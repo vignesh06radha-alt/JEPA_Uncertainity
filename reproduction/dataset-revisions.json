@@ -1,0 +1,14 @@
+[
+  {
+    "task": "pusht",
+    "revision": "655cd446b9929369d7d406001da85c15d1457850"
+  },
+  {
+    "task": "reacher",
+    "revision": "e70a080d0d04c6072123c9ebd343acf7fff28dbf"
+  },
+  {
+    "task": "cube",
+    "revision": "02a19a67a0dc8c9d6215f89c19e0a597691e152a"
+  }
+]

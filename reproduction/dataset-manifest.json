@@ -1,0 +1,89 @@
+[
+  {
+    "task": "pusht",
+    "files": [
+      {
+        "type": "file",
+        "oid": "bed0738c7eeb449bca98b5d2f33c89a1ee56349a",
+        "size": 2504,
+        "path": ".gitattributes"
+      },
+      {
+        "type": "file",
+        "oid": "afa431023f1f27fd7378e79a1f740f0f889814be",
+        "size": 136,
+        "path": "README.md"
+      },
+      {
+        "type": "file",
+        "oid": "0f7c50ecb25af70ac9633acdae9288a201dead28",
+        "size": 13136247974,
+        "lfs": {
+          "oid": "7cfbd6d90fa2f27876379a5ff169715a36ed82edbda64f9e5b5bfa34d212f318",
+          "size": 13136247974,
+          "pointerSize": 136
+        },
+        "xetHash": "a8dcf14ef922f03e388acda1ac87a643d0684d17ef0374f6f08bc963f3c7e58f",
+        "path": "pusht_expert_train.h5.zst"
+      }
+    ]
+  },
+  {
+    "task": "reacher",
+    "files": [
+      {
+        "type": "file",
+        "oid": "bed0738c7eeb449bca98b5d2f33c89a1ee56349a",
+        "size": 2504,
+        "path": ".gitattributes"
+      },
+      {
+        "type": "file",
+        "oid": "b8e40cd17c1a60f651eb3fc993df21a75800842e",
+        "size": 141,
+        "path": "README.md"
+      },
+      {
+        "type": "file",
+        "oid": "22c81f6154ac9844f0032d903c6bb3d58efd1d85",
+        "size": 23750614946,
+        "lfs": {
+          "oid": "4ff2385e49712caa89f21b8e0a246e2614b621d3f22cf2d1224d845e879a1cc2",
+          "size": 23750614946,
+          "pointerSize": 136
+        },
+        "xetHash": "bcd2f16a8344a2cb39052ddd70b4bafc0a078656e5c31d319ea229d8a372a78d",
+        "path": "reacher.tar.zst"
+      }
+    ]
+  },
+  {
+    "task": "cube",
+    "files": [
+      {
+        "type": "file",
+        "oid": "bed0738c7eeb449bca98b5d2f33c89a1ee56349a",
+        "size": 2504,
+        "path": ".gitattributes"
+      },
+      {
+        "type": "file",
+        "oid": "77ca56fb39d72b07ae0a891d9c63a96c483da646",
+        "size": 143,
+        "path": "README.md"
+      },
+      {
+        "type": "file",
+        "oid": "01e3f03328086b91750f474872e03428f4d63e9a",
+        "size": 46184624478,
+        "lfs": {
+          "oid": "3725d6a01abd492164441ef0a27e588f52b94a118fab56b96987b1a34a6c2600",
+          "size": 46184624478,
+          "pointerSize": 136
+        },
+        "xetHash": "ffe07ef65b18ea16455f304e1d22fc9e617381cd874576103419dea1064503bf",
+        "path": "cube_single_expert.tar.zst"
+      }
+    ]
+  }
+]

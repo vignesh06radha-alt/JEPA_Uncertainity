@@ -1,0 +1,56 @@
+[
+  {
+    "task": "pusht",
+    "revision": "22b330c28c27ead4bfd1888615af1340e3fe9052",
+    "files": [
+      {
+        "rfilename": ".gitattributes"
+      },
+      {
+        "rfilename": "README.md"
+      },
+      {
+        "rfilename": "config.json"
+      },
+      {
+        "rfilename": "weights.pt"
+      }
+    ]
+  },
+  {
+    "task": "reacher",
+    "revision": "62adae4b71dc474ddf8f794c476ebfe737a743ca",
+    "files": [
+      {
+        "rfilename": ".gitattributes"
+      },
+      {
+        "rfilename": "README.md"
+      },
+      {
+        "rfilename": "config.json"
+      },
+      {
+        "rfilename": "weights.pt"
+      }
+    ]
+  },
+  {
+    "task": "cube",
+    "revision": "b0747c5002e86d2ce8f3cd8178004b97524c587d",
+    "files": [
+      {
+        "rfilename": ".gitattributes"
+      },
+      {
+        "rfilename": "README.md"
+      },
+      {
+        "rfilename": "config.json"
+      },
+      {
+        "rfilename": "weights.pt"
+      }
+    ]
+  }
+]
