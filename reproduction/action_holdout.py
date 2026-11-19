@@ -45,6 +45,13 @@ def split_episodes(dataset, rng):
     return episodes[2 * held_out:], episodes[:held_out], episodes[held_out:2 * held_out]
 
 
+def partition_validation(episodes):
+    """Reserve disjoint episodes for score fitting, beta selection, and thresholds."""
+    if len(episodes) < 3:
+        raise ValueError("At least three validation episodes are required; enlarge the smoke fixture.")
+    return [part.tolist() for part in np.array_split(np.asarray(episodes), 3)]
+
+
 def id_action_rows(dataset, raw_actions, training_indices):
     """Return only actions that appear in a permitted training input."""
     coordinates = np.asarray(dataset.clip_indices)[training_indices]

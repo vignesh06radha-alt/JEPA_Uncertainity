@@ -1,6 +1,6 @@
 # Uncertainty in SIGReg JEPA world models
 
-First reproduce LeWorldModel on **PushT, Reacher, and OGBench-Cube**. Then evaluate predictor ensembles, latent kNN distance, and prior deviation under action and visual shifts.
+Build an uncertainty evaluator for SIGReg-regularized LeWorldModel using predictor ensembles, latent kNN, and prior diagnostics under action and visual shifts. PushT and Reacher form the core study; OGBench-Cube adds targeted failure-event evaluation. Official reproduction provides the reference. See the [final implementation plan](IMPLEMENTATION_PLAN.md) for the workflow and remaining work.
 
 ## Current status
 
@@ -25,7 +25,7 @@ To verify the GPU setup before downloading the published datasets, run `bash set
 python smoke_experiment.py --task pusht --output ./pusht-smoke
 ```
 
-The smoke command downloads the released checkpoint and generates six simulator episodes in a new output directory. It runs training and planning checks, fits the three uncertainty estimators, and writes offline, warning, abstention, and paired planning reports. Use `--task reacher` or `--task cube` for the other simulators. Pass `--existing-checkpoint /path/to/released/model` to reuse a downloaded checkpoint. The smoke outputs verify execution with local fixtures. Continue below to reproduce the published benchmark.
+The smoke command downloads the released checkpoint and generates 30 short simulator episodes in a new output directory. This supports separate score-fitting, penalty-selection, and threshold-calibration partitions. It runs training and planning checks, fits the three uncertainty estimators, and writes offline, warning, retrospective abstention, and paired planning reports. Use `--task reacher` or `--task cube` for the other simulators. Pass `--existing-checkpoint /path/to/released/model` to reuse a downloaded checkpoint. These outputs verify execution with fixtures, not benchmark performance.
 
 ```bash
 git clone https://github.com/vignesh06radha-alt/JEPA_Uncertainity.git
@@ -98,7 +98,7 @@ printf '%s\n' '{"method":"prior","beta":0.1}' > prior-smoke.json
 python run.py eval --task pusht --smoke --uncertainty-config prior-smoke.json
 ```
 
-An uncertainty configuration accepts `method` (`prior`, `knn`, or `ensemble`), a nonnegative `beta`, and a positive `scale` fitted on ID validation scores. For `knn`, provide a `training_bank` tensor file and optional `k`. For `ensemble`, provide `predictor_checkpoints` as paths relative to the stable-worldmodel checkpoint cache, with the base predictor counted as one member. The other members share the base vision encoder and projection. The command stores the exact configuration next to the evaluation results.
+An uncertainty configuration accepts `method` (`prior`, `knn`, or `ensemble`), a nonnegative `beta`, and a positive `scale` fitted on score-calibration episodes. For `knn`, provide a `training_bank` tensor file and optional `k`. New ensemble fits provide five equally trained `predictor_checkpoints` with `include_base_predictor=false`; the original predictor remains the baseline goal model. All heads share the frozen vision encoder, projection, and action-encoder training policy. Legacy configurations count the base predictor by default and must be refitted for the revised study. The command stores the exact configuration beside results.
 
 Fit the ensemble and reference bank, then evaluate on the held-out episodes:
 
@@ -108,9 +108,9 @@ python run.py eval --task pusht --uncertainty-config "$STABLEWM_HOME/uncertainty
 python run.py eval --task pusht --uncertainty-config "$STABLEWM_HOME/uncertainty/pusht/run1/ensemble.json"
 ```
 
-Fitting keeps the encoder frozen, bootstraps training episodes for the four additional predictors, and saves disjoint episode splits. Score scales use ID validation clips. A released checkpoint may have seen data used for this downstream split.
+Fitting keeps the representation and action encoder frozen, bootstraps training episodes for all five fresh predictors, and saves disjoint episode roles. Score scales use only score-calibration clips. A released checkpoint may have seen data used for this downstream split; use the same separately trained restricted checkpoint for primary action/visual comparisons.
 
-The fit also saves `prior-diagnostics.json` for observed and predicted ID validation latents. Under the isotropic Gaussian assumption, the two-sided radial tail score follows an exponential distribution. The fit switches the prior estimator to Mahalanobis distance if the radial KS distance exceeds 0.20 or at least 5% of the scores hit the numerical ceiling. These are fixed diagnostic thresholds. The fallback uses a shrinkage covariance and mean fitted on training latents only, and both offline evaluation and CEM load the same selected mode.
+The fit saves `prior-diagnostics.json`, including norm mean/variance and saturation, and training-only shrinkage covariance in `prior-stats.pt`. Under the isotropic Gaussian assumption, the two-sided radial tail score follows an exponential distribution. The planner switches to Mahalanobis if radial KS distance exceeds 0.20 or at least 5% of scores hit the ceiling; these are fixed heuristic thresholds. Offline evaluation retains both radial and Mahalanobis scores, current-observation kNN/prior scores, and clean-target error regardless of the planner mode. Physical probe errors remain auxiliary diagnostics.
 
 ```bash
 python evaluate_uncertainty.py --task pusht \
@@ -145,10 +145,10 @@ For closed-loop visual evaluation, run a clean validation pass to calibrate the 
 
 ```bash
 settings="$STABLEWM_HOME/uncertainty/pusht/run1/prior.json"
-python run.py eval --task pusht --uncertainty-config "$settings" --calibration
+python run.py eval --task pusht --uncertainty-config "$settings" --threshold-calibration
 python run.py eval --task pusht --uncertainty-config "$settings" --visual-tint 0.35
 base="$STABLEWM_HOME/results/eval-pusht-released-train3072-seed42-uncertainty-prior"
-python report_episode_metrics.py --calibration "$base-calibration/metrics.json" \
+python report_episode_metrics.py --calibration "$base-threshold-calibration/metrics.json" \
   --test "$base-tint-0.35/metrics.json" --output pusht-tint-035-episodes.json
 ```
 
@@ -158,10 +158,11 @@ For a full study, choose the penalty on clean validation episodes before running
 for beta in 0 0.05 0.1 0.25; do
   python run.py eval --task pusht --uncertainty-config "$settings" --calibration --beta "$beta"
 done
-python select_penalty.py "$base"-beta-*-calibration/metrics.json --output prior-selected.json
+python select_penalty.py "$base"-beta-*-calibration/metrics.json \
+  --output "$STABLEWM_HOME/uncertainty/pusht/run1/prior-selected.json"
 ```
 
-The selector checks that validation cases and planner settings match and maximizes validation successes, breaking ties in favor of the smaller penalty. Use `prior-selected.json` for the held-out run and the validation file for the selected weight when reporting abstention.
+The selector checks matched cases/settings and chooses the largest grid penalty within the empirical ID success-loss tolerance (`--max-id-drop 0.02` by default). Zero remains valid if no positive candidate qualifies. This is not a statistical guarantee of ID preservation. Save the selected configuration beside the original artifacts, then run it with `--threshold-calibration` on the separate threshold episodes before the held-out run. Do not use penalty-selection traces for threshold fitting. Old artifacts need refitting; at least three usable validation episodes are required. See [the revised implementation plan](IMPLEMENTATION_PLAN.md) for the complete protocol and remaining work.
 
 The episode report replays the first-plan accept/reject decision against the recorded outcome. It also measures warnings at later replans and uses the task budget as the failure time for episodes that miss the goal. Run the clean test condition to measure ID false alarms.
 

@@ -188,7 +188,10 @@ def run(args):
         if args.beta is not None:
             settings['beta'] = args.beta
             run_name += f'-beta-{args.beta:g}'
-        settings.update(evaluation_split='validation' if args.calibration else 'test',
+        evaluation_split = 'threshold' if args.threshold_calibration else ('validation' if args.calibration else 'test')
+        if evaluation_split != 'test' and f'{evaluation_split}_episode_ids' not in settings:
+            raise ValueError('Refit artifacts with separate selection and threshold episode partitions.')
+        settings.update(evaluation_split=evaluation_split,
                         visual_tint=args.visual_tint)
         if 'action_severity_edges' in settings:
             settings['action_band'] = args.action_band if args.action_band is not None else 0
@@ -198,6 +201,8 @@ def run(args):
             run_name += f'-action-band-{args.action_band}'
         if args.calibration:
             run_name += '-calibration'
+        if args.threshold_calibration:
+            run_name += '-threshold-calibration'
         if args.visual_tint:
             run_name += f'-tint-{args.visual_tint}'
     if args.smoke:
@@ -243,7 +248,9 @@ def main():
     parser.add_argument('--beta', type=float, help='Override the uncertainty penalty for a validation sweep')
     parser.add_argument('--checkpoint', help='Weights path in the stable-worldmodel checkpoint cache')
     parser.add_argument('--action-holdout', type=float, help='Train on clips below this training action quantile')
-    parser.add_argument('--calibration', action='store_true', help='Evaluate only ID validation episodes')
+    calibration = parser.add_mutually_exclusive_group()
+    calibration.add_argument('--calibration', action='store_true', help='Evaluate ID penalty-selection episodes')
+    calibration.add_argument('--threshold-calibration', action='store_true', help='Evaluate separate ID threshold episodes')
     parser.add_argument('--action-band', type=int, choices=(0, 1, 2, 3),
                         help='Select cases by recorded action band, with 0 in the training range')
     parser.add_argument('--visual-tint', type=float, default=0.0, choices=(0.0, 0.15, 0.35, 0.6))
@@ -256,13 +263,13 @@ def main():
         parser.error('--uncertainty-config is only supported for eval')
     if args.beta is not None and (not args.calibration or not math.isfinite(args.beta) or args.beta < 0):
         parser.error('--beta requires calibration and a finite, nonnegative weight')
-    if (args.calibration or args.visual_tint or args.action_band is not None) and (
+    if (args.calibration or args.threshold_calibration or args.visual_tint or args.action_band is not None) and (
         not args.uncertainty_config or args.action != 'eval'
     ):
         parser.error('Calibration and shift flags require evaluation with an uncertainty configuration')
-    if args.calibration and args.visual_tint:
+    if (args.calibration or args.threshold_calibration) and args.visual_tint:
         parser.error('Calibration requires clean visuals')
-    if args.action_band and (args.calibration or args.visual_tint):
+    if args.action_band and (args.calibration or args.threshold_calibration or args.visual_tint):
         parser.error('Higher action bands must use test episodes with clean visuals')
     if args.action == 'doctor':
         doctor()

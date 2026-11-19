@@ -15,7 +15,7 @@ from stable_worldmodel.wm.utils import load_pretrained, save_pretrained
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from action_holdout import clip_magnitudes, split_episodes
+from action_holdout import clip_magnitudes, partition_validation, split_episodes
 from run import TASKS, SOURCE, data_root
 from uncertainty import check_prior, ensemble_disagreement, knn_distance, mahalanobis_distance, prior_deviation
 
@@ -76,6 +76,7 @@ def fit(args):
     validation = [i for i in validation if i in groups]
     if not training or not validation:
         raise ValueError("No clips remain in the training or validation partition.")
+    calibration, selection, threshold = partition_validation(validation)
     if holdout:
         scaler = StandardScaler()
         scaler.mean_ = np.asarray(holdout["action_mean"])
@@ -97,6 +98,7 @@ def fit(args):
             "action_holdout_quantile": holdout["quantile"] if holdout else None,
         },
         "train": np.asarray(training).tolist(), "validation": np.asarray(validation).tolist(),
+        "score_calibration": calibration, "penalty_selection": selection, "threshold_calibration": threshold,
         "test": test.tolist(), "action_cutoff": holdout["cutoff"] if holdout else None,
         "action_severity_edges": holdout["severity_edges"] if holdout else None,
     }, indent=2))
@@ -114,9 +116,9 @@ def fit(args):
     bank = bank.to(device)
     k = min(10, len(bank))
 
-    predictors = [model]
+    predictors = []
     names = []
-    for index in range(1, args.members):
+    for index in range(args.members):
         torch.manual_seed(args.seed + index)
         member = load_pretrained(checkpoint).to(device).eval().requires_grad_(False)
         member.encoder = model.encoder
@@ -143,7 +145,7 @@ def fit(args):
         names.append(f"{name}/weights.pt")
         predictors.append(member)
 
-    validation_indices = [i for ep in validation for i in groups[ep]]
+    validation_indices = [i for ep in calibration for i in groups[ep]]
     values = {method: [] for method in ("prior", "knn", "ensemble")}
     observed, forecasts = [], []
     with torch.inference_mode():
@@ -151,16 +153,17 @@ def fit(args):
             latents, actions = batch_latents(model, batch, scaler, device)
             predicted = torch.stack([predict(member, latents, actions)[:, -1] for member in predictors])
             observed.append(latents[:, -1].cpu())
-            forecasts.append(predicted[0].cpu())
-            values["knn"].append(knn_distance(predicted[0], bank, k).cpu())
+            base_forecast = predict(model, latents, actions)[:, -1]
+            forecasts.append(base_forecast.cpu())
+            values["knn"].append(knn_distance(base_forecast, bank, k).cpu())
             values["ensemble"].append(ensemble_disagreement(predicted).cpu())
     validation_predictions = torch.cat(forecasts)
     diagnostics, prior_stats = check_prior(bank, torch.cat(observed), validation_predictions)
     (out / "prior-diagnostics.json").write_text(json.dumps(diagnostics, indent=2))
-    if prior_stats is None:
+    torch.save(prior_stats, out / "prior-stats.pt")
+    if diagnostics["mode"] == "chi_square":
         values["prior"].append(prior_deviation(validation_predictions))
     else:
-        torch.save(prior_stats, out / "prior-stats.pt")
         values["prior"].append(mahalanobis_distance(validation_predictions, **prior_stats))
     for method, parts in values.items():
         scores = torch.cat(parts)
@@ -168,7 +171,9 @@ def fit(args):
             "method": method, "beta": args.beta, "scale": max(float(scores.mean()), 1e-8),
             "action_mean": scaler.mean_.tolist(), "action_scale": scaler.scale_.tolist(),
             "dataset_name": dataset_name, "test_episode_ids": test_episode_ids,
-            "validation_episode_ids": row_ids[np.asarray(dataset.offsets)[validation]].tolist(),
+            "validation_episode_ids": row_ids[np.asarray(dataset.offsets)[selection]].tolist(),
+            "score_calibration_episode_ids": row_ids[np.asarray(dataset.offsets)[calibration]].tolist(),
+            "threshold_episode_ids": row_ids[np.asarray(dataset.offsets)[threshold]].tolist(),
             "base_checkpoint": checkpoint,
         }
         if holdout:
@@ -177,12 +182,13 @@ def fit(args):
             settings.update(training_bank=bank_path.name, k=k)
         elif method == "ensemble":
             settings["predictor_checkpoints"] = names
+            settings["include_base_predictor"] = False
         else:
             settings["prior_mode"] = diagnostics["mode"]
-            if prior_stats is not None:
+            if diagnostics["mode"] == "mahalanobis":
                 settings["prior_stats"] = "prior-stats.pt"
         (out / f"{method}.json").write_text(json.dumps(settings, indent=2))
-    print(f"Saved {len(bank)} training latents and {len(names)} additional predictors to {out}")
+    print(f"Saved {len(bank)} training latents and {len(names)} equally trained predictors to {out}")
 
 
 if __name__ == "__main__":

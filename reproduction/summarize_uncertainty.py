@@ -22,9 +22,11 @@ def conditions(report):
 def extract_metrics(condition):
     if condition is None:
         return {}
-    output = {name: condition[name] for name in ("latent_error", "physical_error", "probe_error")}
-    for estimator in ("knn", "prior", "ensemble"):
-        for metric, value in condition[estimator].items():
+    output = {name: condition[name] for name in ("latent_error", "clean_target_error", "physical_error", "probe_error")
+              if name in condition}
+    for estimator in ("knn", "prior", "ensemble", "observed_knn", "observed_prior",
+                      "predicted_norm", "observed_norm", "predicted_mahalanobis", "observed_mahalanobis"):
+        for metric, value in condition.get(estimator, {}).items():
             output[f"{estimator}.{metric}"] = value
     return output
 

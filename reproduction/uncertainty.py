@@ -63,14 +63,14 @@ def check_prior(training_latents, validation_observed, validation_predicted):
         scores = prior_deviation(latents).cpu().numpy()
         diagnostics[name] = {
             "count": len(scores),
+            "squared_norm_mean": float(latents.float().square().sum(-1).mean()),
+            "squared_norm_variance": float(latents.float().square().sum(-1).var(unbiased=False)),
             "ks_distance": float(kstest(scores, "expon").statistic),
             "saturation_fraction": float((scores >= -math.log(1e-12) - 1e-5).mean()),
         }
     fallback = any(item["ks_distance"] > 0.20 or item["saturation_fraction"] >= 0.05
                    for item in diagnostics.values())
     diagnostics["mode"] = "mahalanobis" if fallback else "chi_square"
-    if not fallback:
-        return diagnostics, None
     fit = LedoitWolf().fit(training_latents.detach().cpu().double().numpy())
     covariance = torch.from_numpy(fit.covariance_)
     identity = torch.eye(len(covariance), dtype=covariance.dtype)
@@ -91,16 +91,19 @@ class UncertainLeWM(torch.nn.Module):
     """Keep LeWM's goal cost and score only newly predicted rollout steps."""
 
     def __init__(self, model, method, *, beta=0.0, scale=1.0, training_bank=None,
-                 predictors=(), k=10, prior_stats=None):
+                 predictors=(), k=10, prior_stats=None, include_base_predictor=True):
         super().__init__()
         if method not in {"ensemble", "knn", "prior"} or beta < 0 or scale <= 0:
             raise ValueError("Choose a supported score, a nonnegative beta, and a positive scale.")
         if method == "ensemble" and not predictors:
             raise ValueError("Provide trained ensemble members.")
+        if method == "ensemble" and len(predictors) + int(include_base_predictor) < 2:
+            raise ValueError("Disagreement requires at least two predictors.")
         if method == "knn" and training_bank is None:
             raise ValueError("Provide a bank of training latents.")
         self.model = model
         self.predictors = torch.nn.ModuleList(predictors)
+        self.include_base_predictor = include_base_predictor
         self.register_buffer("training_bank", training_bank)
         self.register_buffer("prior_center", prior_stats["center"] if prior_stats else None)
         self.register_buffer("prior_whitening", prior_stats["whitening"] if prior_stats else None)
@@ -129,7 +132,7 @@ class UncertainLeWM(torch.nn.Module):
             scores = self.score_prior(predicted)
         else:
             # Use the base model's cached observation latents for every member.
-            members = [predicted]
+            members = [predicted] if self.include_base_predictor else []
             for member in self.predictors:
                 result = member.rollout(dict(info), actions)
                 members.append(result["predicted_emb"][..., history:, :])
@@ -159,6 +162,8 @@ def load_uncertain_model(model, config_json):
     for field in ("action_mean", "action_scale", "dataset_name", "test_episode_ids",
                   "validation_episode_ids", "base_checkpoint", "evaluation_split", "visual_tint",
                   "action_band", "action_severity_edges", "prior_mode"):
+        config.pop(field, None)
+    for field in ("score_calibration_episode_ids", "threshold_episode_ids"):
         config.pop(field, None)
     device = next(model.parameters()).device
     bank_path = config.pop("training_bank", None)

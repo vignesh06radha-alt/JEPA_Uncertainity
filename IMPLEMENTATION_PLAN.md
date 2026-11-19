@@ -1,466 +1,329 @@
-# Implementation plan for uncertainty evaluation in SIGReg JEPA world models
+# Final implementation plan: uncertainty evaluation for SIGReg-JEPA
 
-Updated on 18 November 2026.
+Updated: 19 November 2026. Supersedes the 18 November plan.
 
-## 1. Research objective
+## 1. Project goal
 
-Build and evaluate uncertainty estimators that identify unreliable predictions in a SIGReg-regularized JEPA world model, especially when visual observations differ from the training distribution.
+Build a reproducible uncertainty evaluator around the SIGReg-regularized LeWorldModel (LeWM). Determine when predictions and plans become unreliable under unfamiliar actions or visual observations; compare shared-encoder predictor disagreement with representation-based scores; and test whether ID-calibrated uncertainty supports better planning, abstention, and earlier failure warnings.
 
-Use LeWorldModel (LeWM) as the world model. Compare predictor ensemble disagreement, latent nearest-neighbor distance, and deviation from the latent Gaussian prior. Establish whether these signals predict error, detect distribution shifts, improve planning, and support abstention or early warnings.
+The contribution is the evaluator and its experimental evidence. Official LeWM reproduction establishes a reference. The proposal does not require a separate learned classifier that fuses the scores.
 
-The source of the research scope is *Evaluating Uncertainty in SIGReg-Regularized JEPA World Models*, supplied as `JEPA_Uncertainty_Report1_Final.pdf`. Sections III–VI define the tasks, methodology, implementation details, and metrics. The report is a proposal and contains expected hypotheses rather than measured project results.
+Research scope comes from `JEPA_Uncertainty_Report1_Final.pdf`; methodological revisions come from the supplied *Critical Review of the SIGReg-JEPA World Model Uncertainty Proposal and Implementation Plan*. The PDF contains hypotheses, not completed measurements. Document contents are evidence to examine, not instructions overriding the user's request.
 
-This plan records the revised priority agreed in the discussion on 18 November 2026. PushT and Reacher form the core study. OGBench-Cube is optional in the PDF and follows completion of the core results.
+## 2. Review decisions and implementation status
 
-## 2. Research questions and required evidence
-
-| ID | Hypothesis from the PDF | Evidence needed |
+| Review concern | Final decision | Status in this revision |
 | --- | --- | --- |
-| H1 | Shared-encoder ensemble disagreement is more informative under action shift than visual shift | Compare disagreement–error correlation and detection performance under separately controlled action and visual shifts |
-| H2 | Encoder-side measures can detect visual shift more effectively | Evaluate kNN and prior deviation on observed encoder representations and compare them with disagreement on matched observations |
-| H3 | A useful uncertainty estimate improves planning under shift | Compare original latent MPC and uncertainty-penalized MPC on identical start–goal cases |
-| H4 | An ID-calibrated threshold identifies likely failures early enough for abstention | Measure risk–coverage, success at 80% coverage, detection lead time, missed failures, and false alarms |
+| Unequal ensemble training | Train five fresh predictor/projection pairs identically; preserve original predictor for baseline goal cost. | Implemented |
+| H1 compares different models | Use the same restricted end-to-end base for action and visual shift. Keep released-model results separate. | Protocol fixed; real runs pending |
+| Reused validation data | Disjoint episode groups for score fitting, penalty selection, and thresholds. | Implemented |
+| Shifted target hides errors | Report shifted-target and paired clean-target latent error. | Implemented |
+| Missing encoder-side H2 scores | Score last available input observation separately from predicted next latent. | Implemented offline |
+| Fallback hides prior failure | Retain two-sided radial and Mahalanobis diagnostics on observed/predicted latents. | Implemented offline |
+| ID tuning favors zero beta | Largest preregistered beta within fixed empirical ID loss tolerance; zero remains valid. | Implemented; tolerance defaults to 0.02 |
+| Dependent paired cases | Episode-cluster bootstrap; exact McNemar only for one case per episode. | Implemented |
+| Limited visual shifts | Distractors/occlusion and explicit observation/goal modes. | Pending |
+| Missing SIGReg controls | Regularizer-strength sweep and independent encoders. | Pending |
+| Weak failure-event evidence | Validate Cube events; separate timeout lead time. | Pending |
+| Retrospective rejection only | Actual accept/reject branch before first task action. | Pending |
 
-The report specifies five predictors initially, kNN with k = 10, three severity levels per shift family, 3–5 seeds, and 95% confidence intervals. It does not specify a target AUROC, correlation, or minimum success-rate improvement. The cited 96% PushT success figure is a baseline literature result.
+Refit old uncertainty artifacts before the revised study. Legacy ensemble loading remains available, but new fits exclude the original, unequally trained predictor from disagreement. Threshold reports now require the separate threshold partition.
 
-A finding that an estimator fails under shift can answer the research question if the evaluation is valid and reproducible. Experiments should preserve negative results.
+## 3. Interpret the critique carefully
 
-## 3. Scope and priority
+1. SIGReg encourages a training-distribution latent shape. It does not prove unfamiliar images have Gaussian latents. Measure that behavior.
+2. Mahalanobis can address ID mean/covariance mismatch. It cannot guarantee detection of OOD representations overlapping ID representations.
+3. A simulator provides actual physical states, but latent forecasts do not automatically yield physical predictions. A state probe remains a learned mapping that can fail under shift. Direct task outcomes provide independent behavioral evidence.
+4. A positive penalty is not guaranteed to improve planning. The bounded-loss rule is an experimental policy, not a performance guarantee. Report zero when no positive candidate qualifies.
+5. Fifty cases give two-percentage-point success-rate resolution, not precise evidence that a two-point drop is harmless. Increase independent selection cases where feasible and report uncertainty.
+6. Cube drops/divergence are not automatically irreversible failures. Validate an environment-specific event or label it a proxy.
+7. Independent encoders generally use different latent coordinates. Never subtract raw latent vectors without validated alignment.
+8. A small lambda sweep provides sensitivity evidence, not a general causal proof about SIGReg.
 
-### Required core work
+## 4. Hypotheses and required evidence
 
-- Verify the official LeWM baseline on real PushT data.
-- Prepare episode-disjoint training, validation, ID-test, and shifted-test partitions.
-- Implement a comparable five-member predictor ensemble with a frozen shared representation.
-- Build a training-only latent kNN reference bank.
-- Implement prior deviation and check the Gaussian assumption, with empirical Mahalanobis fallback when appropriate.
-- Measure uncertainty against latent and physical-state prediction errors.
-- Evaluate controlled action and visual shifts at three severities.
-- Compare uncertainty-aware planning with the original planner.
-- Evaluate initial abstention and warnings during execution.
-- Repeat the settled experiment on Reacher and across independent seeds.
-- Run the ensemble-size and kNN-neighbor ablations.
-- Produce the final tables, plots, and conclusions for H1–H4.
+| ID | Question | Evidence |
+| --- | --- | --- |
+| H1 | Is shared-encoder disagreement more informative under action shift? | Same checkpoint across shift families; within-condition uncertainty/error Spearman and detection metrics |
+| H2 | Do encoder-side scores reveal visual unreliability better? | Current-observation kNN and radial/Mahalanobis versus disagreement; shift AUROC plus error/failure association |
+| H3 | Does uncertainty improve MPC under shift? | Paired baseline/penalized success, recovered failures, lost successes, latency, and intervals |
+| H4 | Can an ID threshold support abstention and warnings? | Risk-coverage, AURC, failure AUROC, top-80% success, frozen-threshold coverage, false alarms, misses, event lead time |
 
-### Optional extension
+The proposal specifies five predictors, k=10, three shift severities, 3-5 seeds, and 95% intervals. It gives no required AUROC, correlation, or minimum improvement. Existing benchmark references (PushT 96%, Reacher 86%, Cube 74%) are literature baselines, not achieved results or uncertainty targets. Preserve negative findings.
 
-Extend the completed protocol to OGBench-Cube. Schedule this after the PushT and Reacher results, ablations, and analysis are complete.
+## 5. Scope and priorities
 
-### Implementation focus
+- PushT: complete development and confirmatory uncertainty study.
+- Reacher: second core task and transfer of conclusions.
+- OGBench-Cube: baseline reproduction plus targeted H4 event study after the core pipeline works; broader sweeps follow if useful.
+- Begin confirmatory work with three independent base-training seeds. Expand to five for unstable estimates or modest effects. Evaluation seeds do not replace training seeds.
+- Start Cube event validation with 1-2 seeds and 50 independent cases per seed, clearly labeled exploratory.
+- Separate official reproduction from the action-restricted uncertainty protocol.
 
-The uncertainty evaluator combines estimation code, calibration artifacts, and experimental analysis around LeWM. The proposed methods do not require an additional neural classifier that fuses the three scores. Keep each estimator separately measurable.
+## 6. End-to-end workflow
 
-## 4. Current implementation and course corrections
-
-The repository contains baseline runners, dataset and checkpoint manifests, uncertainty scores, ensemble fitting, offline analysis, action holdout, planning traces, and reporting commands. Local simulator fixtures exercised these paths on CPU and CUDA. The verification record reports 18 passing tests. Published-dataset reproduction and the research hypotheses remain unverified.
-
-| Issue identified in the current workflow | Correction before the main study |
-| --- | --- |
-| Repeated small smoke runs consumed time before real-data results | Use smoke checks to resolve execution failures, then prioritize the first substantive PushT result |
-| All three environments received equal priority | Finish PushT, validate on Reacher, then consider Cube |
-| Reproduction expanded into a large preliminary task | Verify official checkpoints and evaluation settings, and train fresh models where controlled action support requires it |
-| kNN and prior scores primarily used predicted future latents | Add observed-latent scoring for H2 and retain predicted-latent scoring for planning |
-| The original trained predictor is grouped with four newly initialized predictors | Give all five members comparable training and data support before interpreting disagreement |
-| New ensemble members inherit a frozen action encoder | Define the action-conditioning boundary and train its components consistently across members |
-| Failure is represented by the goal deadline | Label timeout lead time explicitly and use task-specific physical failure events where available |
-| Abstention is calculated retrospectively | Retain risk–coverage analysis and add a real initial accept/reject execution path |
-| Diagnostic thresholds and probe choices were added during implementation | Record these as experimental decisions and fix them before inspecting shifted-test outcomes |
-
-The baseline implementation can remain useful while the uncertainty path is corrected. The next research milestone is a real-data PushT uncertainty table with observed and predicted scores distinguished and physical prediction errors included.
-
-## 5. Overall workflow
-
-```mermaid
-flowchart TD
-    A[Verify official LeWM on real PushT data] --> B[Freeze splits and shift protocol]
-    B --> C[Freeze representation and train comparable ensemble]
-    C --> D[Build kNN bank and prior diagnostics]
-    D --> E[Measure uncertainty against latent and physical errors]
-    E --> F[Calibrate settings on ID validation]
-    F --> G[Compare original and uncertainty-aware MPC]
-    G --> H[Evaluate abstention and early warnings]
-    H --> I[Repeat across seeds and on Reacher]
-    I --> J[Complete ablations and final report]
-    J --> K[Optional OGBench-Cube extension]
+```text
+Pinned source and datasets
+ -> integrity checks and official baseline reference
+ -> frozen episode train/validation/test manifest
+ -> training-only action cutoff, scaler, and severity edges
+ -> end-to-end restricted SIGReg-JEPA base checkpoints
+ -> freeze vision encoder, projector, and action encoder
+ -> five equally trained bootstrapped predictor heads
+ -> training-only latent bank, covariance, diagnostic physical probes
+ -> score-calibration episodes: scales and ID diagnostics
+ -> penalty-selection episodes: fixed beta grid and ID tolerance
+ -> threshold-calibration episodes: selected-policy plan scores
+ -> held-out ID, action, and visual tests
+ -> paired MPC, actual gate, warnings, validated event records
+ -> independent-encoder and SIGReg-strength controls
+ -> episode/seed-aware tables, plots, and H1-H4 conclusions
 ```
 
-## 6. Phase 1 — Freeze the experimental specification
+## 7. Phase A: Linux environment and baseline
 
-### Actions
+### Steps
 
-1. Identify the exact dataset version, checkpoint, preprocessing, environment version, and code revision.
-2. Partition complete episodes into training, validation, and ID-test data.
-3. Generate shifted tests from the designated test partition.
-4. Define the supported action range in each environment’s actual action convention.
-5. Define three severities for each shift family.
-6. Define one-step and rollout prediction horizons.
-7. Specify physical probe targets and units.
-8. Specify task success, failure, episode budget, and warning timestamps.
-9. Specify normalization, hyperparameter selection, and threshold calibration rules.
-10. Record training seeds and evaluation case sampling seeds separately.
+1. Install on the user's Linux GPU system through `reproduction/setup.sh` with pinned upstream revisions.
+2. Record GPU/memory, driver, Python, Torch/CUDA, package versions, source revisions, configurations, and dataset hashes. Export the exact environment.
+3. Use at least the report's proposed 16 GB GPU memory for full training, subject to an actual memory check. The local 6 GB GPU supports constrained smoke checks.
+4. Store datasets/checkpoints outside Git. Use a Linux data root rather than assuming Windows D: exists. Earlier estimates were about 83 GB compressed and 247 GB extracted across tasks; verify current manifest sizes and free space first.
+5. Run generated-fixture smoke checks. The revised fixture contains 30 short episodes to support separate validation roles.
+6. Download PushT, Reacher, and Cube through the pinned manifest. Verify columns, image preprocessing, frame ordering, and simulator initialization.
+7. Run released models with official benchmark/planner settings. Save per-case outcomes and configurations; investigate discrepancies before interpreting reference-rate differences.
 
-Fit reference banks, probe parameters, and empirical latent distributions using training data. Use ID validation for score scales, penalty weights, and abstention thresholds. Preserve ID-test and shifted-test results for final evaluation.
+### Exit condition
 
-### Deliverables
+Real-dataset baseline reports exist for all tasks, or an unavailable task is documented. Generated-fixture success does not meet this condition. Time a real batch and short planning run before full training.
 
-- A versioned experiment configuration.
-- Episode split manifests.
-- Shift definitions and severity parameters.
-- A metric definition sheet.
+## 8. Phase B: partitions and action support
 
-### Completion evidence
+1. Freeze a recorded episode split per task and reuse it across training seeds.
+2. Existing splitting reserves approximately 80% train, 10% validation, 10% test episodes. Divide validation into score-calibration, penalty-selection, and threshold-calibration groups.
+3. Require at least three usable validation episodes; smaller fixtures fail explicitly. Real calibration needs substantially more than this software minimum.
+4. Filter support before checking group sizes. Save dataset episode indices and exported episode IDs. Audit zero overlap across all five roles.
+5. Fit action means/scales and cutoff using training episodes only. Freeze three higher-action severity bands from training support.
+6. Record retained windows/episodes, action distributions, and physical-state coverage. Action restriction may also alter visited states; acknowledge this confounding limit.
+7. Train primary bases end to end on restricted training windows. No calibration/test episode may enter gradient updates or checkpoint selection. Audit upstream validation behavior before confirmatory training.
+8. Use the same restricted base for action-only and visual-only H1/H2 tests. Visual tests use within-support actions. Match states where feasible; otherwise report coverage differences.
+9. Distinguish demonstration action bands from commands executed by MPC. Keep raw command-exposure counts; a higher reference band alone does not prove executed action OOD.
 
-- Every episode has one declared partition.
-- Reference and calibration data sources are traceable.
-- A result can be recreated from its code, model, dataset, split, and configuration identifiers.
+**Exit condition:** reproducible overlap/support audit, adequate data, and identical base identity across primary shift comparisons.
 
-## 7. Phase 2 — Establish the real PushT baseline
+## 9. Phase C: uncertainty estimators
 
-### Actions
+### C1. Comparable shared-encoder ensemble
 
-1. Download and inspect the official PushT dataset.
-2. Verify its schema, action semantics, episode boundaries, and image preprocessing.
-3. Load the official LeWM checkpoint.
-4. Run evaluation using the matching CEM/MPC protocol.
-5. Save per-episode outcomes and the exact start–goal pairs.
-6. Measure latent prediction error and planning runtime.
-7. Investigate material deviations through preprocessing, normalization, simulator behavior, checkpoint loading, and planner settings.
+- Train five fresh predictor/prediction-projection pairs with the same optimizer, learning rate, epochs, clip budget, and model mode.
+- Freeze the shared vision encoder, latent projector, and pretrained action encoder for every member.
+- Use distinct recorded seeds and episode bootstrap samples.
+- Keep original base predictions for goal cost and base prediction-error measurement; do not silently substitute the ensemble mean.
+- Supply identical observed latents/actions to all members during candidate rollouts. Score only newly predicted steps.
+- Record member loss and held-out prediction error. Diagnose severe underfitting or pathological heads before interpreting disagreement.
+- Treat five heads as one estimator, not five independent research runs.
 
-The PDF explicitly starts with official code and checkpoints. Verification of that baseline is sufficient to start the uncertainty comparison. Fresh end-to-end training is required for the restricted-action model so that its representation and dynamics have the intended training support.
+### C2. Latent kNN
 
-### Deliverables
+- Training-only bank; initial existing cap 4096 latents; default mean Euclidean distance, k=10.
+- Record sampling seed, bank size, checkpoint identity, and memory residency.
+- Separate current-observation H2 scores from predicted-rollout MPC scores.
+- Later vary bank size and k in {1, 5, 10, 20} where supported; measure cost.
 
-- Real-data baseline success rate and per-case outcomes.
-- Checkpoint and environment provenance.
-- A short explanation of any remaining reproduction discrepancy.
+### C3. Prior and covariance
 
-### Completion evidence
+- Retain the implemented two-sided radial score: negative log of twice the smaller chi-square tail, clipped at 1e-12. Track its numerical ceiling.
+- Fit shrinkage covariance/mean on training latents only. Save it even if radial diagnostics look acceptable.
+- Report radial and Mahalanobis separately for observed/predicted latents, regardless of the selected planner mode.
+- Record squared-norm mean/variance, KS distance, saturation, and collapse diagnostics. Correlated clips do not provide independent Gaussianity-test samples.
+- Label the existing fallback rule (KS >0.20 or saturation >=5%) an operational heuristic, not a calibrated OOD probability or proof of Gaussianity.
 
-The model demonstrates useful ID prediction and planning behavior under the declared protocol. Exact agreement with a single published percentage is assessed in the context of case sampling and run variation.
+### C4. Action-space baseline
 
-## 8. Phase 3 — Build controlled shifts
+Add training-only action-vector kNN under the same scaler. Distinguish observed-history and candidate-action queries. Measure overhead rather than calling it free.
 
-### 8.1 Visual shift
+## 10. Phase D: errors and visual conditions
 
-1. Choose held-out physical states and action sequences.
-2. Produce clean and perturbed observations for the same states.
-3. Apply three predetermined appearance severities.
-4. Preserve state, dynamics, actions, and goal reachability.
-5. Record whether the perturbation affects the current observations, goal observations, or both.
-6. Use the same perturbation rule for training-free evaluation across seeds.
+Preserve paired clean/transformed renderings of the same physical trajectory.
 
-The PDF permits colors or distractors. The proposed initial implementation uses one controlled color-change family to complete the central comparison quickly. Add another visual family after the first result is understood.
-
-Image transformations should preserve object visibility sufficiently to represent the intended visual shift. Record any severity that introduces occlusion or removes task information.
-
-### 8.2 Action shift
-
-1. Define the supported action range using the environment’s action convention.
-2. Train the base encoder and dynamics on permitted transitions only.
-3. Keep episode-disjoint ID validation and test sets.
-4. Evaluate actions outside the supported range at three severities.
-5. Maintain clean visual rendering rules.
-6. Save commanded actions and actions actually applied after simulator clipping.
-
-Use matched starting states for supported versus unsupported one-step actions where the simulator permits state restoration. Higher-action recorded trajectories can introduce state-distribution differences and should be identified as such in the analysis.
-
-### Deliverables and completion evidence
-
-Save clean/shifted case pairs, severity labels, and action-support evidence. Demonstrate that visual perturbations preserve the underlying physical trajectories and that held-out action tests use actions excluded from training.
-
-## 9. Phase 4 — Implement the estimators consistently
-
-### 9.1 Representation boundary
-
-Identify the complete pathway producing the target latent used by the prediction loss and SIGReg. Record whether this includes a projection head. Freeze that pathway for the ensemble experiment.
-
-Keep the latent definition consistent across target prediction, kNN references, distribution fitting, and probes. If a different latent is useful for an analysis, name it explicitly and report that comparison separately.
-
-### 9.2 Predictor ensemble
-
-Start with N = 5 as specified in the PDF.
-
-- Initialize each member’s trainable components independently.
-- Use the same architecture, training support, stopping rule, and training budget.
-- Bootstrap complete training trajectories for diversity.
-- Decide which action-encoding and prediction-projection components belong to each member.
-- Train those components consistently.
-- Compare member ID prediction losses before interpreting disagreement.
-
-For member predictions ź_i and their mean ź_mean, use a declared variance aggregation such as mean squared distance from the ensemble mean across latent dimensions. Save both the member predictions and the resulting scalar score.
-
-Measure disagreement for the same next-step input first. Evaluate divergence between member rollouts as a separate horizon-dependent quantity.
-
-### 9.3 Latent kNN
-
-- Build the reference bank from training observations only.
-- Start with k = 10.
-- Define the distance and neighbor aggregation explicitly.
-- Score observed latents to detect unfamiliar observations.
-- Score predicted future latents separately for planning.
-- Record bank size and sampling strategy.
-- Check stability under a practical reference-bank size change before fixing the bank.
-
-### 9.4 Prior deviation and fallback
-
-- Check the empirical latent distribution on ID data.
-- Implement deviation of squared latent norm from its expected chi-square distribution.
-- Inspect numerical saturation and the information retained by the scalar score.
-- Apply training-fitted empirical Mahalanobis distance when the Gaussian assumption is poor.
-- Select the fallback using ID information only.
-- Record the chosen mode and diagnostic thresholds.
-
-The PDF specifies checking the Gaussian assumption and using the fallback. The exact test statistic, thresholds, covariance regularization, and tail score remain implementation choices that must be documented.
-
-### Deliverables
-
-- Five comparable predictor checkpoints.
-- A training latent bank.
-- Prior diagnostics and distribution artifacts.
-- Explicit interfaces for observed-input scores and rollout scores.
-
-### Completion evidence
-
-Each estimator is reproducible, has the intended data source, and returns finite scores. ID loss checks establish that ensemble disagreement is not dominated by severely undertrained members.
-
-## 10. Phase 5 — Build error labels and physical probes
-
-### Latent error
-
-Measure the norm between the predicted next latent and the encoded next observation. Record whether a result uses a norm, squared norm, or mean squared error. Use one declared convention in each comparison.
-
-### Physical-state error
-
-Fit a linear probe on ID training latents and simulator states.
-
-| Environment | Initial physical quantities |
+| Metric | Interpretation |
 | --- | --- |
-| PushT | Block position, block orientation, and agent position |
-| Reacher | Arm joint configuration and/or end-effector position |
-| OGBench-Cube, optional | Cube position and relevant manipulation state |
+| Shifted-target error | `||g(f(o_t_shift),a)-f(o_next_shift)||`; both sides can be corrupted |
+| Clean-target error | `||g(f(o_t_shift),a)-f(o_next_clean)||`; still a representation diagnostic |
+| Probe forecast error | ID-training-only physical probe on forecast versus actual future state; auxiliary |
+| Probe representation error | Same probe on actual encoded observation versus physical state; exposes probe/representation failure |
+| Direct task evidence | Simulator success, physical goal distance, task-specific trajectory measures independent of the probe |
 
-For orientation, specify angular wrapping or a sine/cosine representation. Report units and any training-fitted standardization.
+Do not call a probe result direct physical model error. Save units, normalization, training data, and held-out ID probe quality. Primary physical-prediction claims require an explicitly validated physical-output model.
 
-Evaluate the probe on both observed latents and predicted latents. Report observed-latent probe error alongside physical prediction error to show when the probe itself becomes unreliable under visual shift.
+### Visual matrix
 
-### Prediction record
-
-Each record should identify the task, seed, episode, step, condition, severity, action, prediction horizon, estimator score, latent error, and physical error. Retain member predictions or sufficient artifacts to inspect disagreements.
-
-### Completion evidence
-
-The probe works adequately on held-out clean data, and uncertainty can be aligned with a measurable error at the same prediction horizon.
-
-## 11. Phase 6 — Produce the first substantive uncertainty result
-
-Run the complete offline comparison on PushT before expanding the planning study.
-
-| Condition | Ensemble | Observed-latent kNN | Observed-latent prior/fallback |
-| --- | --- | --- | --- |
-| ID | Error ranking | Error ranking | Error ranking |
-| Action shift, severity 1–3 | Correlation and shift detection | Correlation and shift detection | Correlation and shift detection |
-| Visual shift, severity 1–3 | Correlation and shift detection | Correlation and shift detection | Correlation and shift detection |
-
-Repeat the relevant scoring analysis on predicted future latents and label it accordingly.
-
-### Metrics
-
-- Spearman correlation between uncertainty and latent error.
-- Spearman correlation between uncertainty and physical-state error.
-- AUROC distinguishing clean and shifted examples.
-- Score distributions by condition and severity.
-- Error distributions by condition and severity.
-
-Calculate error correlation within each condition as well as any pooled analysis. A pooled correlation can be driven by differences between groups rather than useful rankings within them.
-
-Shift detection and failure prediction answer different questions. Include task failure labels in the downstream analysis and avoid treating shift AUROC alone as proof of failure awareness.
-
-### Deliverables
-
-- A real-data uncertainty comparison table.
-- Uncertainty-versus-error plots.
-- Examples of low-disagreement/high-error visual failures.
-- An initial interpretation of H1 and H2.
-
-### Completion evidence
-
-The results show what each method detects, where it is overconfident, and whether the observations support the proposed hypotheses.
-
-## 12. Phase 7 — Calibrate using ID validation data
-
-1. Fit score normalization from ID validation scores.
-2. Define the planning penalty grid before inspecting shifted-test results.
-3. Evaluate candidate penalty weights on matched ID validation cases.
-4. Choose the penalty using the stated selection rule.
-5. Fit an abstention threshold from ID validation plan scores.
-6. Freeze these choices for all declared test conditions.
-
-Permit the selected planning weight to be zero. Record undefined metrics and constant score distributions explicitly.
-
-If the same validation partition serves both model selection and threshold calibration, record that reuse. Use separate ID subsets when needed to reduce selection effects and sufficient data are available.
-
-### Completion evidence
-
-Every test configuration has a saved ID calibration artifact and selection record. Shifted-test outcomes do not influence these choices.
-
-## 13. Phase 8 — Compare planning performance
-
-The baseline planner minimizes terminal latent distance to the encoded goal. The uncertainty-aware planner adds a weighted sum of uncertainty along the predicted trajectory.
-
-For each paired comparison, use identical start–goal cases, action constraints, solver settings, evaluation seeds, and execution budgets.
-
-Evaluate each estimator independently. Fix how ensemble predictions produce the planning goal cost so estimator comparisons do not silently change the underlying planning model.
-
-### Metrics
-
-- Task success rate for ID and each shift severity.
-- Paired success-rate difference.
-- Failures recovered and successes lost.
-- Planning runtime.
-- Raw and applied action exposure beyond training support.
-
-An input-unfamiliarity score can identify a visually shifted scene while providing little differentiation among candidate action sequences. Measure candidate score variation and inspect examples to interpret planning results.
-
-### Completion evidence
-
-Matched results establish whether the penalty helps, harms, or has no measurable effect under each condition. Report this outcome even when it contradicts H3.
-
-## 14. Phase 9 — Abstention and early warnings
-
-### Initial abstention
-
-1. Plan from the initial observation.
-2. Score the final plan returned by CEM.
-3. Use its maximum predicted uncertainty as the episode acceptance score.
-4. Apply the threshold fitted on ID validation data.
-5. Execute accepted episodes and record declined episodes.
-
-Retrospective evaluation using complete attempted trajectories can support risk–coverage analysis. Verify the actual initial accept/reject branch as well.
-
-### Metrics
-
-- Coverage, the fraction of offered episodes attempted.
-- Risk, the failure fraction among attempted episodes.
-- Area under the risk–coverage curve.
-- Success at 80% coverage, with the achieved coverage disclosed when tied scores prevent exactly 80%.
-- Successful completions divided by all offered episodes.
-
-### Warnings during execution
-
-Score the returned plan at every replan and save its simulator-step timestamp. Define failure events before evaluation.
-
-- For goal timeout, measure warning time relative to the deadline and label it timeout lead time.
-- For an observable physical failure, use that event’s actual timestamp.
-- Where a task lacks a meaningful earlier failure event, disclose that limitation.
-
-Report lead time together with detected-failure fraction, missed failures, and ID false-alarm rate. Specify the false-alarm denominator and whether the metric is per step or per episode. Long lead time alone does not establish reliable warnings.
-
-### Completion evidence
-
-The selected score supports a reproducible accept/reject decision and the warning metrics use a declared failure event and time unit.
-
-## 15. Phase 10 — Reacher, seeds, and ablations
-
-Repeat the settled experiment on Reacher using its physical quantities and action semantics.
-
-Start with three independent seeds, within the report’s 3–5 seed range. Expand to five when observed run variation makes conclusions unstable and compute permits it.
-
-Distinguish independent base-model training seeds, ensemble-fitting seeds, and evaluation sampling seeds. Confidence intervals must use the relevant independent run as the replication unit. Repeated evaluation of one checkpoint does not measure independent model-training variation.
-
-### Required ablations
-
-| Factor | PDF starting value | Proposed compact comparison |
+| Family | Three severities | Modes |
 | --- | --- | --- |
-| Ensemble size | N = 5 | N = 3 and 5 |
-| kNN neighbors | k = 10 | k = 5, 10, and 20 |
+| Tint | Existing alpha 0.15, 0.35, 0.60 | Observation only; observation plus goal |
+| Distractor | Seeded irrelevant textures/objects at predefined coverage levels | Observation only; observation plus goal |
+| Occlusion | Predefined image-area fractions with task-critical overlap logged | Observation only; observation plus goal |
 
-The comparison values are implementation proposals. Fix them before the final ablation runs. Hold other settings constant and preserve the same test cases.
+Add a goal-only diagnostic subset. Freeze severity/placement before test outcomes. Transform the model input without changing physics and inspect saved images. Current closed-loop tint shifts observation and goal together; new families/mode switches remain pending.
 
-### Completion evidence
+Separate harmless shifts from harmful shifts using behavior. Shift AUROC alone does not prove useful uncertainty.
 
-The results include both core environments, independent-run variation, and evidence of sensitivity to the requested estimator parameters.
+## 11. Phase E: offline H1/H2 analysis
 
-## 16. Phase 11 — Final analysis and submission
+1. Run clean/action/visual conditions on the same checkpoint and held-out cases.
+2. Persist per-clip scores/errors, episode IDs, starts, action magnitudes, visual family/mode/severity, seed, and checkpoint. Current output contains condition summaries; per-clip export remains necessary for offline cluster resampling.
+3. Report within-condition Spearman for both latent errors and auxiliary probe error. Do not rely on pooled ID/OOD correlation.
+4. Report shift AUROC per condition and failure AUROC where labels are defensible. Leave undefined metrics null when a class is absent.
+5. Plot score/error distributions and examples: high error/low uncertainty, high uncertainty/success, ordinary ID.
+6. Show current-observation and forecast scores separately, including saturation/collapse diagnostics.
+7. Bootstrap whole episodes rather than overlapping windows once per-clip output exists.
 
-Prepare the following outputs.
+**Exit condition:** one complete PushT pilot has comparable conditions, no target look-ahead, expected artifacts, and interpretable diagnostics. Freeze analysis before confirmatory runs.
 
-1. Baseline verification table with reported and reproduced settings and results.
-2. Dataset partition counts and shift definitions.
-3. Estimator-quality tables for ID, action shift, and visual shift.
-4. Uncertainty-versus-error and score-distribution plots.
-5. Planning success by shift severity.
-6. Risk–coverage curves and success at the declared coverage.
-7. Lead time, missed failures, and false alarms.
-8. Ensemble-size and kNN-neighbor ablations.
-9. Qualitative confident-failure examples.
-10. A conclusion for each of H1–H4, supported or unsupported as measured.
-11. Reproduction commands, versions, checkpoint identifiers, and configuration artifacts.
+## 12. Phase F: MPC and beta selection
 
-The report should distinguish observations about the shared encoder, dynamics predictors, and planning behavior. Explain limitations in the probes, severity definitions, and available failure events.
+Preserve original goal cost and planner. Add beta times summed normalized predicted-step uncertainty. A current-observation score is constant across candidate actions; it belongs in warnings/gating and cannot change CEM rankings.
 
-## 17. Repository work map
+### Selection steps
 
-The current scripts provide a starting point for the corrected workflow. Their presence does not establish completion of the experiments.
+1. Fit scales and ID diagnostics on score-calibration episodes.
+2. Preregister grid {0, 0.05, 0.10, 0.25} and empirical ID loss tolerance 0.02. These are protocol choices, not PDF performance targets.
+3. Evaluate each beta on identical clean within-support penalty-selection cases.
+4. Select the largest beta with empirical success at least baseline minus tolerance. Save all candidate outcomes, tolerance, and grid.
+5. Report sample-size limitations, lost/recovered cases, and latency. Increase independent cases for precise selection.
+6. If no positive beta qualifies, retain zero and report the negative result. Do not rescue it using shifted test data.
+7. After selection, collect threshold-calibration episodes under that exact policy; selected-plan distributions change with beta.
+8. Evaluate paired baseline/penalized clean and shifted test cases. Full beta sensitivity is secondary; never choose the best test beta afterward.
 
-| Component | Current file | Planned use or correction |
+The current planner comparison requires positive treatment beta. If selection yields zero, record 'no admissible positive penalty' and omit that comparison.
+
+## 13. Phase G: actual gate and early warnings
+
+### Initial gate
+
+Before the first task action: plan, score, compare with frozen threshold, then accept or reject. Record rejection separately, coverage, and success conditional on acceptance. Rejection is not automatically success/failure.
+
+Current reports reconstruct this decision from completed traces; they do not execute a real gate.
+
+### Hybrid warning
+
+Evaluate the maximum of normalized shared-ensemble prediction disagreement and current-observation kNN. Fit scales on score-calibration episodes and the combined threshold on threshold-calibration episodes. Preserve components. Only candidate-dependent forecast terms can steer MPC.
+
+### Failure events
+
+- Log physical state, simulator step, task success, termination reason, selected plan, and warning score at replans.
+- PushT/Reacher timeout lead time means time to budget exhaustion. Corners/divergence remain proxies unless validated terminal failures.
+- Inspect Cube task semantics and validate object-loss/task-defined events. Distinguish recoverable drops from terminal failure.
+- Freeze event rules before tests; preserve evidence/timestamps. Measure lead time only for pre-event warnings against valid events.
+- Report event counts, missed failures, detection rate, successful-ID false alarms, and lead-time distributions. Separate timeout results.
+- If no defensible event or enough failures exists, state the limitation. Do not claim a safety guarantee.
+
+## 14. Phase H: SIGReg-specific controls
+
+### Independent encoders
+
+Reuse 3-5 independently trained checkpoints where possible. Reusing training compute still incurs extra encoder inference.
+
+Start with ID-normalized scalar goal-cost/error rankings on identical candidates. Alternatively use validated physical-output probes in common coordinates. Never calculate raw latent variance across unrelated encoders without validated alignment. Label the distinction between scalar-cost disagreement and shared-latent variance.
+
+### Regularizer strength
+
+PushT sweep: 0.1 times lambda0, lambda0, 5 times lambda0, initially 1-2 matched exploratory seeds. Inspect the exact upstream coefficient name/default before exposing an override. Hold architecture, data, epochs, optimizer, and evaluation fixed.
+
+Measure ID success, representation variance/collapse, observed/predicted norm distributions, kNN/radial/Mahalanobis, clean-target error, and shift behavior. Do not infer general causality from this pilot. A lambda=0 extension requires a collapse check.
+
+### Compact ablations
+
+After the main study works: predictor count {1, 3, 5}, k {1, 5, 10, 20}, bank size, visual family, and observation/goal mode. N=1 has no disagreement and is a prediction/planning reference. Keep the main method frozen.
+
+## 15. Statistical reporting
+
+- Pair identical start-goal cases and evaluation seeds across planners.
+- Prefer one case per episode for independent paired tests. Otherwise bootstrap clusters and withhold case-level McNemar.
+- Implemented paired bootstrap: 2000 replicates, seed 42. Its interval describes episode sampling for one fitted model, not training variation.
+- Report independent training-seed means/95% intervals separately. Checkpoint filenames alone do not prove independent training; retain manifests.
+- Do not count overlapping encoder groups, bootstrap heads, evaluation seeds, or overlapping windows as independent model runs.
+- Add hierarchical episode/seed resampling when combining both sources. Label single-seed results exploratory.
+- Preserve failed runs, unfavorable shifts, and undefined metrics. Lead with effect sizes/intervals. Multiple-condition p-values are exploratory unless correction was preregistered.
+
+## 16. Final outputs
+
+| Artifact | Required contents |
+| --- | --- |
+| Baseline table | Checkpoint/task/cases/success/reference delta/exact settings |
+| Data audit | Episode roles, cutoff, retention, action/state coverage, hashes |
+| Offline table | Methods/conditions, both latent errors, probe diagnostics, correlations, shift/failure AUROC |
+| Prior plots | Observed/predicted norms, variance, saturation, radial/Mahalanobis |
+| Planning table | ID/shifted success, recovered/lost cases, beta rule, paired/seed intervals |
+| Selective prediction | Risk-coverage, AURC, top-80% success, frozen-threshold coverage/conditional success |
+| Warning report | Validated events, false alarms, misses, detection, event versus timeout lead time |
+| Controls | Encoder/lambda/count/k/bank controls and overhead |
+| Reproduction bundle | Commands, environment, configs, logs, manifests, hashes, plots, H1-H4 conclusions |
+
+Measure encoder calls, peak GPU memory, plan wall time, and detector overhead on the same hardware. Record bank residency/query chunking.
+
+## 17. Concrete implementation backlog
+
+| Component | Next change | Check |
 | --- | --- | --- |
-| Baseline runner | `reproduction/run.py` | Execute declared benchmark and uncertainty planning configurations |
-| Upstream adaptation | `reproduction/prepare_source.py` | Keep changes explicit and verify reproducibility |
-| Artifact fitting | `reproduction/fit_uncertainty.py` | Correct ensemble comparability and record the representation boundary |
-| Scoring | `reproduction/uncertainty.py` | Separate observed-input scoring from rollout scoring |
-| Action support | `reproduction/action_holdout.py` | Validate action semantics, split integrity, and actual support exclusion |
-| Offline evaluation | `reproduction/evaluate_uncertainty.py` | Produce the central real-data comparison with physical probes |
-| Plan instrumentation | `reproduction/plan_trace.py` | Record the selected plan and action exposure |
-| Episode analysis | `reproduction/report_episode_metrics.py` | Clarify timeout warnings and implement actual abstention |
-| Penalty selection | `reproduction/select_penalty.py` | Select settings using ID validation only |
-| Baseline report | `reproduction/benchmark_report.py` | Compare full benchmark results with the declared published protocol |
-| Paired planning | `reproduction/compare_planning.py` | Compare matched cases across penalty settings |
-| Offline summary | `reproduction/summarize_uncertainty.py` | Aggregate independent runs with transparent counts |
-| Smoke workflow | `reproduction/smoke_experiment.py` | Use for integration failures and setup verification |
+| Fitter | Member seeds/losses, base partition provenance | Equal updates; no gradient-data leakage |
+| Offline evaluator | Per-clip export, distractor/occlusion | Matched clips; cluster analysis possible |
+| Runner/trace | Observation/goal modes, actual gate, hybrid warning | Rejection executes zero task actions; constant score cannot alter CEM |
+| Source adapter | Minimal required upstream extensions | Apply twice on fresh pinned source and compare |
+| Episode reporting | Gate records and physical event time | Correct event lead time; reject not success |
+| Planning analysis | Hierarchical analysis when seeds permit | Preserve episode/model dependence |
+| Action analysis | Action-neighborhood baseline/support audit | Training-only bank/scaler |
+| Source/runner | Inspect and expose SIGReg coefficient | Effective coefficient recorded/used |
+| Analysis | Independent-encoder scalar control/figures | No subtraction of unrelated latents |
 
-Commit and push verified project changes. Continue using date-only commit messages in Asia/Dubai. Preserve the source report’s scope when interpreting older repository instructions that treated Cube as required.
+Reuse upstream training/planning. Avoid a generic framework before concrete paths work.
 
-## 18. Fast execution order
+## 18. Supported Linux workflow
 
-| Priority | Work | Exit result |
+Run from `reproduction` after setup/activation. Set `STABLEWM_HOME` to the Linux data root. This template assumes restricted training already produced the recorded `$checkpoint` and `$manifest` paths.
+
+```bash
+python -m unittest discover -s .
+python smoke_experiment.py --task pusht --output /data/jepa/smoke-pusht
+python fit_uncertainty.py --task pusht --name main-seed3072 \
+  --checkpoint "$checkpoint" --holdout-manifest "$manifest"
+artifacts="$STABLEWM_HOME/uncertainty/pusht/main-seed3072"
+python evaluate_uncertainty.py --task pusht --artifacts "$artifacts" \
+  --output /data/jepa/results/pusht-seed3072-offline.json
+settings="$artifacts/ensemble.json"
+for beta in 0 0.05 0.1 0.25; do
+  python run.py eval --task pusht --checkpoint "$checkpoint" \
+    --uncertainty-config "$settings" --calibration --beta "$beta"
+done
+```
+
+Pass four exact matching validation metrics paths to `select_penalty.py`, with `--max-id-drop 0.02`. Save `ensemble-selected.json` inside the artifact directory to preserve relative bank/stats paths.
+
+```bash
+python run.py eval --task pusht --checkpoint "$checkpoint" \
+  --uncertainty-config "$artifacts/ensemble-selected.json" --threshold-calibration
+python run.py eval --task pusht --checkpoint "$checkpoint" \
+  --uncertainty-config "$artifacts/ensemble-selected.json" --visual-tint 0.35
+```
+
+Use threshold-calibration metrics as `report_episode_metrics.py --calibration` input and held-out metrics as `--test`. On the runner, `--calibration` now means penalty selection; `--threshold-calibration` means the separate threshold partition. Beta overrides are allowed only for selection. Pending visual modes, hybrid gating, and physical-event analysis are not supported by these commands yet.
+
+## 19. Fastest credible execution order
+
+| Order | Work | Gate |
 | --- | --- | --- |
-| 1 | Freeze protocol and correct estimator inputs and ensemble training | Faithful implementation ready for real data |
-| 2 | Verify the real PushT baseline | Credible ID model behavior and saved provenance |
-| 3 | Run offline uncertainty comparison on PushT | First substantive table for H1 and H2 |
-| 4 | Run planning, abstention, and warning comparisons | Evidence for H3 and H4 |
-| 5 | Repeat across three seeds and on Reacher | Reproducible core study |
-| 6 | Complete ablations, figures, and writing | Submission-ready project |
-| 7 | Extend to Cube if time and compute remain | Optional cross-task extension |
+| 1 | Reviewed corrections, regression tests, complete generated PushT smoke | Training/scoring/calibration/reporting execute |
+| 2 | Linux setup, real samples, official baselines | Correct data and settings |
+| 3 | Restricted PushT pilot and five predictors | Valid partitions/member quality |
+| 4 | Visual modes, per-clip outputs, gate, event logging | One valid H1-H4 pilot |
+| 5 | Freeze protocol; remaining PushT/Reacher seeds | No further test tuning |
+| 6 | Encoder control and small lambda sweep | Evidence limits explicit |
+| 7 | Targeted Cube events | Validated events or documented limitation |
+| 8 | Aggregate, failure examples, figures, report | Claims trace to artifacts |
 
-Schedule by these dependencies and measured run times. A reliable calendar estimate requires the target GPU, dataset transfer speed, and an initial real-data timing run. Cache frozen-encoder latents for repeated offline predictor and estimator analysis where the transformations and data access rules permit it. Re-encode shifted images when evaluating appearance changes.
+Estimate runtime after the first real epoch and planning batch. Reuse frozen-encoder computations where valid, run independent jobs together as hardware permits, and defer broad ablations until main evidence exists.
 
-Stop repeating successful smoke checks unless a code change or a newly identified concern affects them. Prioritize the actual PushT uncertainty experiment after correcting the identified methodology issues.
+## 20. Completion criteria
 
-## 19. Completion checklist
+The evaluator is implemented; agreed real-data experiments have run; H1-H4 are answered at the strength supported by results; and another Linux user can recreate tables from documented commands/artifacts. Negative results are valid outcomes.
 
-- [ ] Experimental protocol and independent episode splits are fixed.
-- [ ] Official LeWM baseline is verified on real PushT data.
-- [ ] Encoder and target latent definition are documented.
-- [ ] Five predictors receive comparable training.
-- [ ] Observed-latent and rollout uncertainty are evaluated explicitly.
-- [ ] kNN references and empirical distributions use training data only.
-- [ ] Gaussian diagnostics and fallback decisions use ID information only.
-- [ ] Physical probes are validated and their own errors are disclosed.
-- [ ] Action and visual shift families have three reproducible severities.
-- [ ] Held-out actions were excluded from base-model training.
-- [ ] Real-data uncertainty metrics address H1 and H2.
-- [ ] Planning comparisons use matched cases and ID-selected settings.
-- [ ] Initial abstention and warning behavior are evaluated.
-- [ ] Failure events, false-alarm denominators, and timestamps are defined.
-- [ ] Core results cover PushT and Reacher.
-- [ ] Three to five independent runs and 95% intervals are reported appropriately.
-- [ ] Ensemble-size and kNN-neighbor ablations are complete.
-- [ ] Final figures and conclusions address H1–H4, including negative results.
-- [ ] Code, configurations, versions, and run provenance are available in the repository.
-- [ ] OGBench-Cube extension is completed if included in the final submission.
-
-## 20. Immediate next milestone
-
-Produce a real-data PushT table comparing all three estimators under ID, controlled action shift, and controlled visual shift. Include observed and predicted latent scores, physical prediction error, uncertainty–error correlation, and shift AUROC.
-
-This milestone supplies the first direct answer to the proposal’s central question and determines which signals merit the larger planning study.
+Unit tests and generated-fixture smoke checks establish software behavior only. Published-dataset reproduction, shifted performance, actual execution gating, encoder controls, SIGReg sensitivity, and physical-event warning claims remain outstanding until their corresponding runs/artifacts exist. See [the verification record](reproduction/VERIFICATION.md) for checks actually performed.

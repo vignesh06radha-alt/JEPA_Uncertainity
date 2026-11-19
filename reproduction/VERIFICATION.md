@@ -1,4 +1,15 @@
-# Verification record — 2026-11-16
+# Verification record
+
+## Review revision — 2026-11-19
+
+- 21 regression checks passed in Ubuntu/Python 3.10, including disjoint validation roles, exclusion of the original predictor from new ensemble disagreement, bounded-loss beta selection with zero fallback, and episode-dependent paired statistics.
+- The revised generated PushT smoke ran end to end on CUDA using 30 short simulator episodes and the existing released checkpoint. Baseline evaluation, short training, five fresh predictor fits, offline evaluation, separate threshold calibration, tinted planning, retrospective episode reporting, and paired comparison completed.
+- Saved artifacts confirm five fresh heads, disjoint score/selection/threshold/test episode IDs, current-input observed scores, both radial and Mahalanobis diagnostics, and equal shifted-target/clean-target error in the clean condition.
+- An additional CUDA simulator run loaded all five fresh predictors together and completed ensemble-penalized planning. The source adapter produced identical files on its second application to pristine pinned upstream files. The penalty CLI wrote both its selected configuration and tolerance/candidate audit.
+- This revision requires refitting earlier artifacts. Historical counts and protocols below describe earlier revisions and are not current recommendations.
+- Real published-dataset benchmarks, meaningful uncertainty performance, execution-time abstention, physical-event warnings, independent encoders, and regularizer-strength controls remain unverified. The detailed plan distinguishes implemented code from this backlog.
+
+## Earlier verification — 2026-11-16 onward
 
 Passed locally:
 

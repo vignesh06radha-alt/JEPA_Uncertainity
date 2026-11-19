@@ -23,8 +23,8 @@ def read_run(path):
 def evaluate(calibration_path, test_path, target_coverage=0.8):
     validation, validation_settings, val_traces, _ = read_run(calibration_path)
     test, test_settings, traces, budget = read_run(test_path)
-    if validation["metrics"]["evaluation_split"] != "validation" or validation["metrics"]["visual_tint"] != 0:
-        raise ValueError("Threshold calibration needs clean validation episodes.")
+    if validation["metrics"]["evaluation_split"] != "threshold" or validation["metrics"]["visual_tint"] != 0:
+        raise ValueError("Threshold calibration needs the separate clean threshold partition; refit old artifacts.")
     if validation["metrics"].get("action_band", 0) != 0:
         raise ValueError("Threshold calibration needs in-range action cases.")
     exposure = validation["metrics"].get("action_command_exposure")

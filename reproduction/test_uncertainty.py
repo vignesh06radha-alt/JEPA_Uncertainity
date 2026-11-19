@@ -5,8 +5,8 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from action_holdout import clip_magnitudes, id_action_rows, reference_action_bands
-from compare_planning import paired_results
+from action_holdout import clip_magnitudes, id_action_rows, partition_validation, reference_action_bands
+from compare_planning import paired_results, paired_statistics
 from select_penalty import select
 from summarize_uncertainty import summarize
 from uncertainty import (
@@ -40,7 +40,14 @@ class UncertaintySmokeTests(unittest.TestCase):
         clean = summarize(reports)["conditions"]["clean"]["metrics"]
         self.assertIsNone(clean["latent_error"]["checkpoint_run_95_ci"])
 
-    def test_penalty_selection_uses_clean_matched_validation_and_prefers_smaller_ties(self):
+    def test_validation_roles_never_share_episodes(self):
+        parts = partition_validation([9, 2, 4, 7, 3])
+        self.assertEqual(sorted(sum(parts, [])), [2, 3, 4, 7, 9])
+        self.assertTrue(all(set(left).isdisjoint(right) for i, left in enumerate(parts) for right in parts[i + 1:]))
+        with self.assertRaisesRegex(ValueError, "three validation"):
+            partition_validation([1, 2])
+
+    def test_penalty_selection_uses_clean_matched_validation_and_id_tolerance(self):
         from pathlib import Path
         report = {
             "config": {"policy": "released/pusht/weights.pt"}, "dataset_rows": [4, 5],
@@ -53,7 +60,14 @@ class UncertaintySmokeTests(unittest.TestCase):
             (report, dict(settings, beta=0), [], 50), (report, dict(settings, beta=0.1), [], 50),
         ]):
             chosen, _ = select(paths)
-        self.assertEqual(chosen, {"method": "prior", "beta": 0})
+        self.assertEqual(chosen, {"method": "prior", "beta": 0.1})
+        worse = dict(report, metrics=dict(report["metrics"], episode_successes=[False, False]))
+        with patch("select_penalty.read_run", side_effect=[
+            (report, dict(settings, beta=0), [], 50), (worse, dict(settings, beta=0.1), [], 50),
+        ]):
+            chosen, candidates = select(paths)
+        self.assertEqual(chosen["beta"], 0)
+        self.assertFalse(candidates[0.1]["admissible"])
         mismatched = dict(report, start_steps=[2, 4])
         with patch("select_penalty.read_run", side_effect=[
             (report, dict(settings, beta=0), [], 50), (mismatched, dict(settings, beta=0.1), [], 50),
@@ -69,6 +83,14 @@ class UncertaintySmokeTests(unittest.TestCase):
         ]):
             with self.assertRaisesRegex(ValueError, "different start_steps"):
                 paired_results(None, None)
+
+    def test_paired_statistics_respects_reused_episode_clusters(self):
+        result = paired_statistics([0, 0, 1, 1], [1, 1, 0, 0], [3, 3, 7, 7])
+        self.assertEqual(result["independent_episode_clusters"], 2)
+        self.assertIsNone(result["exact_mcnemar_pvalue"])
+        self.assertEqual(result["episode_cluster_bootstrap_95_ci_percentage_points"], [-100, 100])
+        independent = paired_statistics([0] * 6, [1] * 6, list(range(6)))
+        self.assertEqual(independent["exact_mcnemar_pvalue"], 0.03125)
 
     def test_holdout_uses_only_actions_consumed_by_the_predictor(self):
         dataset = SimpleNamespace(clip_indices=[(0, 0), (0, 1), (1, 0)],
@@ -91,6 +113,25 @@ class UncertaintySmokeTests(unittest.TestCase):
         bank = torch.tensor([[0.], [2.], [4.]])
         scores = knn_distance(torch.tensor([[1.], [10.]]), bank, k=2)
         torch.testing.assert_close(scores, torch.tensor([1., 7.]))
+
+    def test_new_ensemble_excludes_unequally_trained_base(self):
+        class Rollout(torch.nn.Module):
+            def __init__(self, value):
+                super().__init__()
+                self.value = value
+
+            def rollout(self, info, actions):
+                info["predicted_emb"] = torch.tensor([[[[0.], [self.value]]]])
+                return info
+
+            def get_cost(self, info, actions):
+                self.rollout(info, actions)
+                return torch.zeros(1, 1)
+
+        scorer = UncertainLeWM(Rollout(100.), "ensemble", predictors=[Rollout(1.), Rollout(3.)],
+                               include_base_predictor=False)
+        _, scores = scorer.score_candidates({"pixels": torch.zeros(1, 1, 1, 3, 1, 1)}, None)
+        torch.testing.assert_close(scores, torch.ones(1, 1, 1))
 
     def test_prior_scores_both_tails(self):
         scores = prior_deviation(torch.tensor([[0., 0.], [1.18, 0.], [10., 0.]]))

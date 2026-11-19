@@ -8,7 +8,9 @@ from pathlib import Path
 from report_episode_metrics import read_run
 
 
-def select(paths):
+def select(paths, max_id_drop=0.02):
+    if not math.isfinite(max_id_drop) or not 0 <= max_id_drop <= 1:
+        raise ValueError("The tolerated ID success drop must lie in [0, 1].")
     matches = None
     candidates = {}
     for path in paths:
@@ -38,7 +40,11 @@ def select(paths):
         }
     if 0 not in candidates or len(candidates) < 2:
         raise ValueError("Include both beta zero and at least one positive beta.")
-    chosen = min(candidates, key=lambda beta: (-candidates[beta]["successful_cases"], beta))
+    baseline = candidates[0]["successful_cases"] / candidates[0]["cases"]
+    for candidate in candidates.values():
+        candidate["success_rate"] = candidate["successful_cases"] / candidate["cases"]
+        candidate["admissible"] = candidate["success_rate"] >= baseline - max_id_drop - 1e-12
+    chosen = max(beta for beta, candidate in candidates.items() if candidate["admissible"])
     chosen_settings = dict(matches[0], beta=chosen)
     for key in ("evaluation_split", "visual_tint", "action_band"):
         chosen_settings.pop(key, None)
@@ -49,8 +55,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("metrics", nargs="+", type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--max-id-drop", type=float, default=0.02,
+                        help="Maximum empirical ID success drop as a fraction (0.02 = two percentage points)")
     args = parser.parse_args()
-    settings, candidates = select(args.metrics)
+    settings, candidates = select(args.metrics, args.max_id_drop)
     with args.output.open("x") as output:
         json.dump(settings, output, indent=2, allow_nan=False)
-    print(json.dumps({"selected_beta": settings["beta"], "validation_runs": candidates}, indent=2))
+    record = {"selected_beta": settings["beta"], "max_id_drop": args.max_id_drop,
+              "validation_runs": candidates}
+    with args.output.with_suffix(".selection.json").open("x") as output:
+        json.dump(record, output, indent=2, allow_nan=False)
+    print(json.dumps(record, indent=2))

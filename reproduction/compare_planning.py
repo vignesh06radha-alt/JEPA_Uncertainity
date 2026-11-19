@@ -5,9 +5,34 @@ import json
 from pathlib import Path
 
 import numpy as np
-from scipy.stats import t
+from scipy.stats import binomtest, t
 
 from report_episode_metrics import read_run
+
+
+def paired_statistics(original, penalized, episode_ids):
+    """Resample episode clusters; exact McNemar requires independent case pairs."""
+    delta = np.asarray(penalized, dtype=int) - np.asarray(original, dtype=int)
+    ids = np.asarray(episode_ids)
+    unique = np.unique(ids)
+    totals = np.array([delta[ids == episode].sum() for episode in unique])
+    sizes = np.array([(ids == episode).sum() for episode in unique])
+    interval = None
+    if len(unique) >= 2:
+        rng = np.random.default_rng(42)
+        # Keep memory bounded when evaluating many episodes.
+        samples = []
+        for _ in range(2000):
+            selected = rng.integers(0, len(unique), size=len(unique))
+            samples.append(100 * totals[selected].sum() / sizes[selected].sum())
+        interval = np.quantile(samples, [0.025, 0.975]).tolist()
+    recovered, lost = int((delta == 1).sum()), int((delta == -1).sum())
+    pvalue = None
+    if len(unique) == len(delta):
+        pvalue = float(binomtest(recovered, recovered + lost, 0.5).pvalue) if recovered + lost else 1.0
+    return {"episode_cluster_bootstrap_95_ci_percentage_points": interval,
+            "exact_mcnemar_pvalue": pvalue, "independent_episode_clusters": len(unique),
+            "bootstrap_replicates": 2000, "bootstrap_seed": 42}
 
 
 def paired_results(baseline_path, penalty_path):
@@ -39,6 +64,7 @@ def paired_results(baseline_path, penalty_path):
         "failures_recovered": int((~original & penalized).sum()),
         "successes_lost": int((original & ~penalized).sum()),
     }
+    summary.update(paired_statistics(original, penalized, baseline["episode_ids"]))
     protocol = {key: cfg[key] for key in ("world", "eval", "plan_config")}
     protocol.update(method=penalty_settings["method"], beta=penalty_settings["beta"],
                     visual_tint=penalty["metrics"]["visual_tint"],

@@ -17,7 +17,8 @@ from torch.utils.data import DataLoader, Subset
 from action_holdout import clip_magnitudes
 from fit_uncertainty import batch_latents, predict
 from run import SOURCE, TASKS, data_root
-from uncertainty import ensemble_disagreement, knn_distance, load_uncertain_model, tint_pixels
+from uncertainty import (ensemble_disagreement, knn_distance, load_uncertain_model,
+                         mahalanobis_distance, prior_deviation, tint_pixels)
 from uncertainty_metrics import prediction_metrics
 
 
@@ -31,9 +32,10 @@ def compare(reference, shifted, mask=None):
     if not mask.any() or not len(reference["latent_error"]):
         return None
     result = {"count": int(mask.sum())}
-    for key in ("latent_error", "physical_error", "probe_error"):
+    for key in ("latent_error", "clean_target_error", "physical_error", "probe_error"):
         result[key] = float(shifted[key][mask].mean())
-    for method in ("prior", "knn", "ensemble"):
+    for method in ("prior", "knn", "ensemble", "observed_knn", "observed_prior",
+                   "predicted_norm", "observed_norm", "predicted_mahalanobis", "observed_mahalanobis"):
         id_scores = reference[method]
         shift_scores = shifted[method][mask]
         pooled = np.r_[id_scores, shift_scores]
@@ -42,7 +44,7 @@ def compare(reference, shifted, mask=None):
             "shift_auroc": None if reference is shifted and mask.all()
             else prediction_metrics(pooled, pooled, labels)["shift_auroc"]
         }
-        for error in ("latent_error", "physical_error"):
+        for error in ("latent_error", "clean_target_error", "physical_error"):
             metrics = prediction_metrics(shift_scores, shifted[error][mask], np.zeros(len(shift_scores)))
             comparison[f"{error}_spearman"] = metrics["spearman"]
         result[method] = comparison
@@ -71,6 +73,7 @@ def evaluate(args):
     ensemble = load_uncertain_model(model, json.dumps(ensemble_config))
     prior = load_uncertain_model(model, json.dumps(prior_config))
     bank = torch.load(directory / knn_config["training_bank"], map_location=device, weights_only=True)
+    stats = torch.load(directory / "prior-stats.pt", map_location=device, weights_only=True)
     model_config = OmegaConf.load((root / "checkpoints" / checkpoint).parent / "config.json")
     state_key = args.state_column or STATE_COLUMNS[args.task]
     dataset = HDF5Dataset(split["dataset"], frameskip=5, num_steps=model_config.predictor.num_frames + 1,
@@ -111,12 +114,14 @@ def evaluate(args):
         magnitudes = []
         for batch in clips(split["test"], args.test_clips):
             true_state = state_scale.transform(batch[state_key][:, -1].reshape(len(batch["action"]), -1))
+            clean_target = batch_latents(model, batch, scaler, device)[0][:, -1]
             for level, records in buckets.items():
                 inputs = dict(batch, pixels=tint_pixels(batch["pixels"], level)) if level else batch
                 latents, actions = batch_latents(model, inputs, scaler, device)
-                members = [model, *ensemble.predictors]
+                members = ([model] if ensemble.include_base_predictor else []) + list(ensemble.predictors)
                 predictions = torch.stack([predict(member, latents, actions)[:, -1] for member in members])
-                forecast, observed = predictions[0], latents[:, -1]
+                forecast, observed = predict(model, latents, actions)[:, -1], latents[:, -1]
+                current = latents[:, -2]  # Last input observation; the target is unavailable online.
                 if not level:
                     if cutoff is None:
                         magnitudes.append(magnitude(actions))
@@ -127,7 +132,14 @@ def evaluate(args):
                     "prior": prior.score_prior(forecast).cpu().numpy(),
                     "knn": knn_distance(forecast, bank, knn_config["k"]).cpu().numpy(),
                     "ensemble": ensemble_disagreement(predictions).cpu().numpy(),
+                    "observed_knn": knn_distance(current, bank, knn_config["k"]).cpu().numpy(),
+                    "observed_prior": prior.score_prior(current).cpu().numpy(),
+                    "predicted_norm": prior_deviation(forecast).cpu().numpy(),
+                    "observed_norm": prior_deviation(current).cpu().numpy(),
+                    "predicted_mahalanobis": mahalanobis_distance(forecast, **stats).cpu().numpy(),
+                    "observed_mahalanobis": mahalanobis_distance(current, **stats).cpu().numpy(),
                     "latent_error": (forecast - observed).norm(dim=-1).cpu().numpy(),
+                    "clean_target_error": (forecast - clean_target).norm(dim=-1).cpu().numpy(),
                     "physical_error": np.sqrt(((probe.predict(forecast.cpu().numpy()) - true_state) ** 2).mean(axis=1)),
                     "probe_error": np.sqrt(((probe.predict(observed.cpu().numpy()) - true_state) ** 2).mean(axis=1)),
                 }
@@ -148,6 +160,8 @@ def evaluate(args):
         "probe_clip_limit": args.probe_clips, "test_clip_limit": args.test_clips,
         "prior_mode": prior_config.get("prior_mode", "chi_square"),
         "physical_state_column": state_key, "probe_rmse_units": "training-state standard deviations",
+        "observed_score_timing": "last input observation, before prediction target",
+        "physical_error_interpretation": "ID-trained probe diagnostic; not direct simulator prediction error",
         "clean": compare(visual_clean, visual_clean),
         "visual_tint": {str(level): compare(visual_clean, buckets[level], visual_mask) for level in VISUAL_LEVELS},
         ("action_holdout" if cutoff is not None else "action_magnitude_diagnostic"): {

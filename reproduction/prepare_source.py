@@ -78,12 +78,13 @@ previous_filter = '''    if "test_episode_ids" in uncertainty_settings:
         valid_mask &= np.isin(dataset.get_col_data(col_name), uncertainty_settings["test_episode_ids"])
 '''
 source = source.replace(previous_filter, '')
+source = source.replace('    elif split == "validation":', '    elif split in {"validation", "threshold"}:')
 old = '    valid_indices = np.nonzero(valid_mask)[0]'
 new = '''    split = uncertainty_settings.get("evaluation_split", "test")
     episode_filter = split + "_episode_ids"
     if episode_filter in uncertainty_settings:
         valid_mask &= np.isin(dataset.get_col_data(col_name), uncertainty_settings[episode_filter])
-    elif split == "validation":
+    elif split in {"validation", "threshold"}:
         raise ValueError("A fitted validation episode split is required for calibration.")
     valid_indices = np.nonzero(valid_mask)[0]'''
 if new not in source:

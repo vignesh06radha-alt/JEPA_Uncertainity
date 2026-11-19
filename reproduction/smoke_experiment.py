@@ -27,7 +27,7 @@ def generate_fixture(task, root):
     try:
         world.envs.action_space.seed(42)
         world.set_policy(RandomPolicy())
-        world.collect(path=target, episodes=6, seed=42, format='hdf5')
+        world.collect(path=target, episodes=30, seed=42, format='hdf5')
     finally:
         world.envs.close()
     with h5py.File(target, 'r+') as data:
@@ -72,11 +72,11 @@ def smoke(task, root, existing_checkpoint):
     run('evaluate_uncertainty.py', '--task', task, '--artifacts', artifacts,
         '--probe-clips', 12, '--test-clips', 10, '--batch-size', 4, '--output', root / 'offline.json')
     settings = artifacts / 'prior.json'
-    run('run.py', 'eval', '--task', task, '--smoke', '--uncertainty-config', settings, '--calibration')
+    run('run.py', 'eval', '--task', task, '--smoke', '--uncertainty-config', settings, '--threshold-calibration')
     run('run.py', 'eval', '--task', task, '--smoke', '--uncertainty-config', settings, '--visual-tint', 0.35)
     cases = root / 'results'
     base = f'smoke-eval-{task}-released-train3072-seed42-uncertainty-prior'
-    validation = cases / f'{base}-calibration' / 'metrics.json'
+    validation = cases / f'{base}-threshold-calibration' / 'metrics.json'
     tinted = cases / f'{base}-tint-0.35' / 'metrics.json'
     run('report_episode_metrics.py', '--calibration', validation, '--test', tinted,
         '--output', root / 'episodes.json')
