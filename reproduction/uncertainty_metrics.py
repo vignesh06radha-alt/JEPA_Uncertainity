@@ -5,6 +5,10 @@ from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 
 
+def trace_score(record):
+    return record["warning_score"] if "warning_score" in record else max(record["scores"])
+
+
 def _auroc(labels, scores):
     if np.unique(labels).size != 2:
         return None
@@ -29,6 +33,8 @@ def prediction_metrics(scores, errors, shifted):
 
 def episode_metrics(scores, success, threshold):
     """Compare episode risk at the fixed ID cutoff and across the score ranking."""
+    if any(outcome is None for outcome in success):
+        raise ValueError("Retrospective risk–coverage needs an outcome for every episode.")
     scores, success = np.asarray(scores), np.asarray(success, dtype=bool)
     if scores.ndim != 1 or scores.shape != success.shape or not scores.size:
         raise ValueError("Provide one score and outcome per episode.")
@@ -82,4 +88,5 @@ def warning_metrics(score_sequences, failure_steps, threshold, in_distribution):
         "mean_lead_time": float(np.mean(lead_times)) if lead_times else None,
         "failure_detection_rate": len(lead_times) / failures if failures else None,
         "id_false_alarm_rate": false_alarms / id_successes if id_successes else None,
+        "successful_id_episodes": id_successes, "successful_id_false_alarms": false_alarms,
     }

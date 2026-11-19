@@ -22,10 +22,10 @@ Research scope comes from `JEPA_Uncertainty_Report1_Final.pdf`; methodological r
 | Fallback hides prior failure | Retain two-sided radial and Mahalanobis diagnostics on observed/predicted latents. | Implemented offline |
 | ID tuning favors zero beta | Largest preregistered beta within fixed empirical ID loss tolerance; zero remains valid. | Implemented; tolerance defaults to 0.02 |
 | Dependent paired cases | Episode-cluster bootstrap; exact McNemar only for one case per episode. | Implemented |
-| Limited visual shifts | Distractors/occlusion and explicit observation/goal modes. | Pending |
-| Missing SIGReg controls | Regularizer-strength sweep and independent encoders. | Pending |
-| Weak failure-event evidence | Validate Cube events; separate timeout lead time. | Pending |
-| Retrospective rejection only | Actual accept/reject branch before first task action. | Pending |
+| Limited visual shifts | Distractors/occlusion and explicit observation/goal modes. | Implemented; real runs pending |
+| Missing SIGReg controls | Regularizer-strength sweep and independent encoders. | Commands and analysis implemented; real runs pending |
+| Weak failure-event evidence | Validate Cube events; separate timeout lead time. | Terminal and budget logging implemented; Cube event validation pending |
+| Retrospective rejection only | Actual accept/reject branch before first task action. | Implemented and exercised on a generated fixture |
 
 Refit old uncertainty artifacts before the revised study. Legacy ensemble loading remains available, but new fits exclude the original, unequally trained predictor from disagreement. Threshold reports now require the separate threshold partition.
 
@@ -163,19 +163,19 @@ Do not call a probe result direct physical model error. Save units, normalizatio
 | Distractor | Seeded irrelevant textures/objects at predefined coverage levels | Observation only; observation plus goal |
 | Occlusion | Predefined image-area fractions with task-critical overlap logged | Observation only; observation plus goal |
 
-Add a goal-only diagnostic subset. Freeze severity/placement before test outcomes. Transform the model input without changing physics and inspect saved images. Current closed-loop tint shifts observation and goal together; new families/mode switches remain pending.
+Add a goal-only diagnostic subset. Freeze severity/placement before test outcomes. Transform the model input without changing physics and inspect saved images. The legacy tint flag transforms observation and goal together. The family and mode flags support each requested combination.
 
 Separate harmless shifts from harmful shifts using behavior. Shift AUROC alone does not prove useful uncertainty.
 
 ## 11. Phase E: offline H1/H2 analysis
 
 1. Run clean/action/visual conditions on the same checkpoint and held-out cases.
-2. Persist per-clip scores/errors, episode IDs, starts, action magnitudes, visual family/mode/severity, seed, and checkpoint. Current output contains condition summaries; per-clip export remains necessary for offline cluster resampling.
+2. Persist per-clip scores/errors, episode IDs, starts, action magnitudes, visual family/mode/severity, seed, and checkpoint. The offline runner writes a JSON Lines sidecar for episode-cluster resampling.
 3. Report within-condition Spearman for both latent errors and auxiliary probe error. Do not rely on pooled ID/OOD correlation.
 4. Report shift AUROC per condition and failure AUROC where labels are defensible. Leave undefined metrics null when a class is absent.
 5. Plot score/error distributions and examples: high error/low uncertainty, high uncertainty/success, ordinary ID.
 6. Show current-observation and forecast scores separately, including saturation/collapse diagnostics.
-7. Bootstrap whole episodes rather than overlapping windows once per-clip output exists.
+7. Bootstrap whole episodes, retaining paired clean and shifted clips in each draw.
 
 **Exit condition:** one complete PushT pilot has comparable conditions, no target look-ahead, expected artifacts, and interpretable diagnostics. Freeze analysis before confirmatory runs.
 
@@ -202,7 +202,7 @@ The current planner comparison requires positive treatment beta. If selection yi
 
 Before the first task action: plan, score, compare with frozen threshold, then accept or reject. Record rejection separately, coverage, and success conditional on acceptance. Rejection is not automatically success/failure.
 
-Current reports reconstruct this decision from completed traces; they do not execute a real gate.
+Actual gating and retrospective assessment use separate reports. The execution gate intersects its acceptance mask with the simulator's active mask before sending any task command.
 
 ### Hybrid warning
 
@@ -263,7 +263,7 @@ Measure encoder calls, peak GPU memory, plan wall time, and detector overhead on
 
 ## 17. Concrete implementation backlog
 
-| Component | Next change | Check |
+| Component | Implementation | Check |
 | --- | --- | --- |
 | Fitter | Member seeds/losses, base partition provenance | Equal updates; no gradient-data leakage |
 | Offline evaluator | Per-clip export, distractor/occlusion | Matched clips; cluster analysis possible |
@@ -279,33 +279,7 @@ Reuse upstream training/planning. Avoid a generic framework before concrete path
 
 ## 18. Supported Linux workflow
 
-Run from `reproduction` after setup/activation. Set `STABLEWM_HOME` to the Linux data root. This template assumes restricted training already produced the recorded `$checkpoint` and `$manifest` paths.
-
-```bash
-python -m unittest discover -s .
-python smoke_experiment.py --task pusht --output /data/jepa/smoke-pusht
-python fit_uncertainty.py --task pusht --name main-seed3072 \
-  --checkpoint "$checkpoint" --holdout-manifest "$manifest"
-artifacts="$STABLEWM_HOME/uncertainty/pusht/main-seed3072"
-python evaluate_uncertainty.py --task pusht --artifacts "$artifacts" \
-  --output /data/jepa/results/pusht-seed3072-offline.json
-settings="$artifacts/ensemble.json"
-for beta in 0 0.05 0.1 0.25; do
-  python run.py eval --task pusht --checkpoint "$checkpoint" \
-    --uncertainty-config "$settings" --calibration --beta "$beta"
-done
-```
-
-Pass four exact matching validation metrics paths to `select_penalty.py`, with `--max-id-drop 0.02`. Save `ensemble-selected.json` inside the artifact directory to preserve relative bank/stats paths.
-
-```bash
-python run.py eval --task pusht --checkpoint "$checkpoint" \
-  --uncertainty-config "$artifacts/ensemble-selected.json" --threshold-calibration
-python run.py eval --task pusht --checkpoint "$checkpoint" \
-  --uncertainty-config "$artifacts/ensemble-selected.json" --visual-tint 0.35
-```
-
-Use threshold-calibration metrics as `report_episode_metrics.py --calibration` input and held-out metrics as `--test`. On the runner, `--calibration` now means penalty selection; `--threshold-calibration` means the separate threshold partition. Beta overrides are allowed only for selection. Pending visual modes, hybrid gating, and physical-event analysis are not supported by these commands yet.
+The [Linux handoff](README.md#restricted-base-uncertainty-study) contains commands for training, fitting, evaluation, penalty selection, frozen threshold calibration, gated and ungated tests, and the controls. Run from `reproduction` with the Linux data disk in `STABLEWM_HOME`. Use `--calibration` for penalty selection and `--threshold-calibration` for the separate threshold partition. Beta overrides are allowed only during selection.
 
 ## 19. Fastest credible execution order
 
@@ -326,4 +300,4 @@ Estimate runtime after the first real epoch and planning batch. Reuse frozen-enc
 
 The evaluator is implemented; agreed real-data experiments have run; H1-H4 are answered at the strength supported by results; and another Linux user can recreate tables from documented commands/artifacts. Negative results are valid outcomes.
 
-Unit tests and generated-fixture smoke checks establish software behavior only. Published-dataset reproduction, shifted performance, actual execution gating, encoder controls, SIGReg sensitivity, and physical-event warning claims remain outstanding until their corresponding runs/artifacts exist. See [the verification record](reproduction/VERIFICATION.md) for checks actually performed.
+Unit tests and generated-fixture smoke checks establish software behavior. Published-dataset reproduction, shifted performance, gate effectiveness, independent-encoder estimates, SIGReg sensitivity, and valid physical-event warning claims require the corresponding real runs and artifacts. See [the verification record](reproduction/VERIFICATION.md) for completed checks.

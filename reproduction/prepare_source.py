@@ -50,7 +50,7 @@ if new not in source:
     assert source.count(old) == 1
     source = source.replace(old, new)
 old = '        solver = hydra.utils.instantiate(cfg.solver, model=model)'
-new = '''        policy_class = swm.policy.WorldModelPolicy
+previous_solver = '''        policy_class = swm.policy.WorldModelPolicy
         policy_options = {}
         if uncertainty_settings:
             from plan_trace import TracedCEM, TracedPolicy
@@ -62,9 +62,18 @@ new = '''        policy_class = swm.policy.WorldModelPolicy
             policy_options["visual_tint"] = uncertainty_settings.get("visual_tint", 0.0)
         else:
             solver = hydra.utils.instantiate(cfg.solver, model=model)'''
+new = previous_solver.replace('            policy_options["visual_tint"] = uncertainty_settings.get("visual_tint", 0.0)',
+    '''            visual_shift = uncertainty_settings.get("visual_shift")
+            if uncertainty_settings.get("visual_tint"):
+                visual_shift = {"family": "tint", "severity": uncertainty_settings["visual_tint"], "mode": "both"}
+            policy_options["visual_shift"] = visual_shift
+            if "gate" in uncertainty_settings:
+                from report_episode_metrics import verify_frozen_threshold
+                verify_frozen_threshold(uncertainty_settings, OmegaConf.to_container(cfg, resolve=True))''')
 if new not in source:
-    assert source.count(old) == 1
-    source = source.replace(old, new)
+    original = previous_solver if previous_solver in source else old
+    assert source.count(original) == 1
+    source = source.replace(original, new)
 old = '''        policy = swm.policy.WorldModelPolicy(
             solver=solver, config=config, process=process, transform=transform
         )'''
@@ -91,11 +100,28 @@ if new not in source:
     assert source.count(old) == 1
     source = source.replace(old, new)
 old = '    end_time = time.time()'
-new = '''    end_time = time.time()
+previous_traces = '''    end_time = time.time()
     if uncertainty_settings:
         metrics["selected_plan_traces"] = [solver.traces.get(i, []) for i in range(len(eval_episodes))]
         metrics["evaluation_split"] = split
         metrics["visual_tint"] = uncertainty_settings.get("visual_tint", 0.0)'''
+new = '''    end_time = time.time()
+    if uncertainty_settings:
+        metrics["evaluation_split"] = split
+        metrics["visual_tint"] = uncertainty_settings.get("visual_tint", 0.0)'''
+if new not in source:
+    original = previous_traces if previous_traces in source else old
+    assert source.count(original) == 1
+    source = source.replace(original, new)
+old = '''    metrics = world.evaluate(
+        dataset=dataset,'''
+new = '''    evaluate = world.evaluate
+    if uncertainty_settings:
+        from functools import partial
+        from plan_trace import evaluate_with_trace
+        evaluate = partial(evaluate_with_trace, world, policy, uncertainty_settings)
+    metrics = evaluate(
+        dataset=dataset,'''
 if new not in source:
     assert source.count(old) == 1
     source = source.replace(old, new)
@@ -118,25 +144,41 @@ new = '''    action_band = uncertainty_settings.get("action_band")
 if new not in source:
     assert source.count(old) == 1
     source = source.replace(old, new)
-old = '        len(valid_indices) - 1, size=cfg.eval.num_eval, replace=False'
-new = '        len(valid_indices) - (action_band is None), size=cfg.eval.num_eval, replace=False'
+old = '''    random_episode_indices = g.choice(
+        len(valid_indices) - 1, size=cfg.eval.num_eval, replace=False
+    )
+
+    # sort increasingly to avoid issues with HDF5Dataset indexing
+    random_episode_indices = np.sort(valid_indices[random_episode_indices])'''
+previous_sampling = old.replace('len(valid_indices) - 1', 'len(valid_indices) - (action_band is None)')
+new = '''    if uncertainty_settings:
+        from action_holdout import sample_cases
+        random_episode_indices = sample_cases(valid_indices, dataset.get_col_data(col_name), cfg.eval.num_eval, g)
+    else:
+        random_episode_indices = g.choice(len(valid_indices) - 1, size=cfg.eval.num_eval, replace=False)
+        random_episode_indices = np.sort(valid_indices[random_episode_indices])'''
 if new not in source:
-    assert source.count(old) == 1
-    source = source.replace(old, new)
+    original = previous_sampling if previous_sampling in source else old
+    assert source.count(original) == 1
+    source = source.replace(original, new)
 old = '    print(metrics)'
-new = '''    if action_band is not None:
+previous_exposure = '''    if action_band is not None:
         metrics["action_band"] = action_band
         metrics["action_command_exposure"] = policy.action_exposure()
     print(metrics)'''
+new = '''    if action_band is not None:
+        metrics["action_band"] = action_band
+    print(metrics)'''
 if new not in source:
-    assert source.count(old) == 1
-    source = source.replace(old, new)
+    original = previous_exposure if previous_exposure in source else old
+    assert source.count(original) == 1
+    source = source.replace(original, new)
 path.write_text(source)
 
 path = root / 'train.py'
 source = path.read_text()
 old = "    with open_dict(cfg):"
-new = '''    holdout = os.environ.get("LEWM_ACTION_HOLDOUT")
+previous_holdout = '''    holdout = os.environ.get("LEWM_ACTION_HOLDOUT")
     if holdout:
         from action_holdout import restrict_training
         from utils import ZScoreNormalizer
@@ -149,9 +191,20 @@ new = '''    holdout = os.environ.get("LEWM_ACTION_HOLDOUT")
             source="action", target="action",
         ))
     with open_dict(cfg):'''
+previous_protocol = previous_holdout.replace(
+    '            dataset, cfg.seed, float(holdout), manifest, dataset_name, cfg.output_model_name,',
+    '''            dataset, cfg.seed, int(os.environ["LEWM_SPLIT_SEED"]), float(holdout), manifest,
+            dataset_name, cfg.output_model_name, cfg.loss.sigreg.weight, os.environ["LEWM_SMOKE_TRAINING"] == "1",''')
+new = previous_protocol.replace(
+    '    if holdout:\n        from action_holdout', '    if holdout:\n        import json\n        from action_holdout'
+).replace(
+    'os.environ["LEWM_SMOKE_TRAINING"] == "1",',
+    '''os.environ["LEWM_SMOKE_TRAINING"] == "1",
+            json.loads(os.environ["LEWM_DATASET_PROVENANCE"]),''')
 if new not in source:
-    assert source.count(old) == 1
-    source = source.replace(old, new)
+    original = next((block for block in (previous_protocol, previous_holdout, old) if block in source))
+    assert source.count(original) == 1
+    source = source.replace(original, new)
 old = '            if col.startswith("pixels"):'
 new = '            if holdout or col.startswith("pixels"):'
 if new not in source:

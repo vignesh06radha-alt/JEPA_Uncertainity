@@ -19,7 +19,7 @@ test "$(git -C vendor/stable-worldmodel rev-parse HEAD)" = abdced49809d5eae38e24
 python -m pip install './vendor/stable-worldmodel[train,format]' \
   'stable-pretraining==0.1.6' 'transformers>=4.50,<5' 'numpy<2' 'mujoco<3.12' dm-control ogbench \
   pygame pymunk shapely opencv-python-headless scikit-learn \
-  huggingface-hub zstandard
+  huggingface-hub zstandard matplotlib
 python prepare_source.py
 python -m pip freeze > environment-lock.txt
 python run.py doctor

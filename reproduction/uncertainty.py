@@ -67,10 +67,17 @@ def check_prior(training_latents, validation_observed, validation_predicted):
             "squared_norm_variance": float(latents.float().square().sum(-1).var(unbiased=False)),
             "ks_distance": float(kstest(scores, "expon").statistic),
             "saturation_fraction": float((scores >= -math.log(1e-12) - 1e-5).mean()),
+            "mean_coordinate_variance": float(latents.float().var(dim=0, unbiased=False).mean()),
+            "fraction_near_constant_coordinates": float((latents.float().var(dim=0, unbiased=False) <= 1e-6)
+                                                       .float().mean()),
         }
     fallback = any(item["ks_distance"] > 0.20 or item["saturation_fraction"] >= 0.05
                    for item in diagnostics.values())
     diagnostics["mode"] = "mahalanobis" if fallback else "chi_square"
+    diagnostics["training_bank"] = {
+        "count": len(training_latents),
+        "mean_coordinate_variance": float(training_latents.float().var(dim=0, unbiased=False).mean()),
+    }
     fit = LedoitWolf().fit(training_latents.detach().cpu().double().numpy())
     covariance = torch.from_numpy(fit.covariance_)
     identity = torch.eye(len(covariance), dtype=covariance.dtype)
@@ -91,7 +98,8 @@ class UncertainLeWM(torch.nn.Module):
     """Keep LeWM's goal cost and score only newly predicted rollout steps."""
 
     def __init__(self, model, method, *, beta=0.0, scale=1.0, training_bank=None,
-                 predictors=(), k=10, prior_stats=None, include_base_predictor=True):
+                 predictors=(), k=10, prior_stats=None, include_base_predictor=True,
+                 observation_scale=None, action_bank=None, action_k=None, action_dim=None):
         super().__init__()
         if method not in {"ensemble", "knn", "prior"} or beta < 0 or scale <= 0:
             raise ValueError("Choose a supported score, a nonnegative beta, and a positive scale.")
@@ -105,12 +113,16 @@ class UncertainLeWM(torch.nn.Module):
         self.predictors = torch.nn.ModuleList(predictors)
         self.include_base_predictor = include_base_predictor
         self.register_buffer("training_bank", training_bank)
+        self.register_buffer("action_bank", action_bank)
         self.register_buffer("prior_center", prior_stats["center"] if prior_stats else None)
         self.register_buffer("prior_whitening", prior_stats["whitening"] if prior_stats else None)
         self.method = method
         self.beta = beta
         self.scale = scale
         self.k = k
+        self.observation_scale = observation_scale
+        self.action_k = action_k
+        self.action_dim = action_dim
         self.register_buffer("action_lower", None)
         self.register_buffer("action_upper", None)
 
@@ -131,7 +143,7 @@ class UncertainLeWM(torch.nn.Module):
         elif self.method == "prior":
             scores = self.score_prior(predicted)
         else:
-            # Use the base model's cached observation latents for every member.
+            # Each rollout uses the same observation history and shared encoder.
             members = [predicted] if self.include_base_predictor else []
             for member in self.predictors:
                 result = member.rollout(dict(info), actions)
@@ -143,6 +155,18 @@ class UncertainLeWM(torch.nn.Module):
         if self.prior_center is not None:
             return mahalanobis_distance(latents, self.prior_center, self.prior_whitening)
         return prior_deviation(latents)
+
+    def score_observation(self, current_latent):
+        if self.observation_scale is None:
+            return None
+        return knn_distance(current_latent, self.training_bank, self.k) / self.observation_scale
+
+    def score_actions(self, standardized_actions):
+        if self.action_bank is None:
+            return None
+        shape = standardized_actions.shape[:-1]
+        vectors = standardized_actions.reshape(*shape, -1, self.action_dim)
+        return knn_distance(vectors, self.action_bank, self.action_k)
 
     def get_cost(self, info, actions):
         if self.action_lower is not None:
@@ -161,13 +185,17 @@ def load_uncertain_model(model, config_json):
     config = json.loads(config_json)
     for field in ("action_mean", "action_scale", "dataset_name", "test_episode_ids",
                   "validation_episode_ids", "base_checkpoint", "evaluation_split", "visual_tint",
-                  "action_band", "action_severity_edges", "prior_mode"):
+                  "action_band", "action_severity_edges", "prior_mode", "visual_shift",
+                  "gate", "base_checkpoint_sha256", "training_provenance", "penalty_selection_complete",
+                  "penalty_selection_rule", "fit_protocol", "artifact_sha256", "diagnostic_prior_stats"):
         config.pop(field, None)
     for field in ("score_calibration_episode_ids", "threshold_episode_ids"):
         config.pop(field, None)
     device = next(model.parameters()).device
     bank_path = config.pop("training_bank", None)
     bank = torch.load(bank_path, map_location=device, weights_only=True) if bank_path else None
+    action_path = config.pop("action_bank", None)
+    action_bank = torch.load(action_path, map_location=device, weights_only=True) if action_path else None
     stats_path = config.pop("prior_stats", None)
     prior_stats = torch.load(stats_path, map_location=device, weights_only=True) if stats_path else None
     predictors = []
@@ -175,6 +203,7 @@ def load_uncertain_model(model, config_json):
         member = load_pretrained(checkpoint)
         member.encoder = model.encoder
         member.projector = model.projector
+        member.action_encoder = model.action_encoder
         predictors.append(member)
     return UncertainLeWM(model, training_bank=bank, predictors=predictors,
-                         prior_stats=prior_stats, **config).to(device).eval().requires_grad_(False)
+                         prior_stats=prior_stats, action_bank=action_bank, **config).to(device).eval().requires_grad_(False)

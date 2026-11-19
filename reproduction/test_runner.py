@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import run
 from benchmark_report import read_baseline
@@ -73,6 +74,54 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('trainer.max_epochs=10', cmd)
         self.assertIn('data=dmc', cmd)
         self.assertIn('data.dataset.name=dmc/reacher_random.h5', cmd)
+
+    def test_sigreg_sweep_uses_upstream_override_and_distinct_checkpoint_paths(self):
+        commands = [run.command(self.args('pusht', action='train', seed=3072, split_seed=13,
+                                          action_holdout=0.8, sigreg_weight=weight), Path('.'), Path('.'))
+                    for weight in (0.009, 0.09, 0.45)]
+        for weight, command in zip((0.009, 0.09, 0.45), commands):
+            self.assertIn(f'loss.sigreg.weight={weight}', command)
+            self.assertIn(f'output_model_name=restricted/0.8/split-13/sigreg-{weight}/pusht/seed-3072', command)
+
+    def test_uncertainty_artifact_hashes_reject_changed_bank_and_member_weights(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = {
+                'base_checkpoint': 'base/weights.pt',
+                'training_bank': 'bank.pt', 'action_bank': 'action-bank.pt',
+                'diagnostic_prior_stats': 'prior-stats.pt',
+                'predictor_checkpoints': ['member/weights.pt'],
+            }
+            paths = run.uncertainty_artifact_paths(root, settings, root)
+            for path in paths.values():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(path.name)
+            with self.assertRaisesRegex(ValueError, 'content hashes'):
+                run.verify_uncertainty_artifacts(root, settings, root, required=True)
+            settings['artifact_sha256'] = {name: run.sha256(path) for name, path in paths.items()}
+            run.verify_uncertainty_artifacts(root, settings, root, required=True)
+            paths['diagnostic_prior_stats'].write_text('replacement')
+            with self.assertRaisesRegex(ValueError, 'diagnostic_prior_stats'):
+                run.verify_uncertainty_artifacts(root, settings, root, required=True)
+            paths['diagnostic_prior_stats'].write_text(paths['diagnostic_prior_stats'].name)
+            paths['training_bank'].write_text('replacement')
+            with self.assertRaisesRegex(ValueError, 'training_bank'):
+                run.verify_uncertainty_artifacts(root, settings, root, required=True)
+            paths['training_bank'].write_text(paths['training_bank'].name)
+            paths['predictor_0_weights'].write_text('replacement')
+            with self.assertRaisesRegex(ValueError, 'predictor_0_weights'):
+                run.verify_uncertainty_artifacts(root, settings, root, required=True)
+
+    def test_download_rejects_an_extracted_dataset_from_a_different_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / 'extracted' / 'pusht' / '.complete'
+            marker.parent.mkdir(parents=True)
+            marker.write_text('older-revision')
+            with patch('run.data_root', return_value=root), patch('huggingface_hub.hf_hub_download') as download:
+                with self.assertRaisesRegex(ValueError, 'differs from the pinned revision'):
+                    run.download('pusht')
+                download.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -4,7 +4,7 @@ Build an uncertainty evaluator for SIGReg-regularized LeWorldModel using predict
 
 ## Current status
 
-The Linux reproduction harness is prepared. All three tasks passed local Ubuntu CPU checks for checkpoint loading, closed-loop planning, and short training runs that saved a checkpoint. These runs used small simulator-generated datasets. The published dataset runs are pending on the target GPU system.
+The runner and uncertainty evaluator are ready for the Linux GPU study. Local checks use small simulator-generated datasets. The published-data benchmarks, full training runs, and H1–H4 estimates are pending on the RTX 4500 Ada with 24 GB of GPU memory. See the [verification record](reproduction/VERIFICATION.md).
 
 ## Run on the Linux GPU system
 
@@ -25,7 +25,7 @@ To verify the GPU setup before downloading the published datasets, run `bash set
 python smoke_experiment.py --task pusht --output ./pusht-smoke
 ```
 
-The smoke command downloads the released checkpoint and generates 30 short simulator episodes in a new output directory. This supports separate score-fitting, penalty-selection, and threshold-calibration partitions. It runs training and planning checks, fits the three uncertainty estimators, and writes offline, warning, retrospective abstention, and paired planning reports. Use `--task reacher` or `--task cube` for the other simulators. Pass `--existing-checkpoint /path/to/released/model` to reuse a downloaded checkpoint. These outputs verify execution with fixtures, not benchmark performance.
+The smoke command generates 30 short episodes and runs released evaluation, restricted training, uncertainty fitting, matched visual shifts, beta selection, threshold calibration, and the execution gate. It uses two evaluation cases and a small CEM population. The fixture support quantile is 0.999 to give short random trajectories enough in-range 25-step paths. Pass `--existing-checkpoint /path/to/released/model` or `--existing-fixture /path/to/fixture.h5` to reuse local files.
 
 ```bash
 git clone https://github.com/vignesh06radha-alt/JEPA_Uncertainity.git
@@ -79,109 +79,104 @@ The report checks the saved protocol, the 50 case outcomes, and successful full-
 ## Pinned sources and limited adaptations
 
 - LeWM: `8edfeb336732b5f3ce7b8b210d0ba370a09e2cac`.
-- stable-worldmodel: `abdced49809d5eae38e24b27dc7b635c502c4812`, selected from the same period to retain the solver interface used by LeWM. Runtime compatibility is not yet verified.
+- stable-worldmodel: `abdced49809d5eae38e24b27dc7b635c502c4812`, which provides the solver and simulator interfaces exercised by the fixture checks.
 - stable-pretraining: `0.1.6`, a March 2026 release that provides the encoder and training interfaces required by the pinned source.
 - Released models and dataset revisions: manifests in `reproduction/`.
 - Training points to released HDF5 files, overriding the newer PushT Lance default and inconsistent Reacher path.
 - A wrapper seeds initialization and worker randomness before executing upstream scripts.
-- Evaluation is adapted only to isolate output folders and save machine-readable metrics. The model, loss, success definitions, and planner algorithm remain upstream implementations.
-- Upstream normalization and splitting are preserved for baseline reproduction. They must be audited before the separate uncertainty experiments, which require training-only reference statistics and trajectory-disjoint validation/test splits.
+- Baseline evaluation uses upstream sampling and success definitions and writes per-case results. The uncertainty mode adds held-out case selection, optional shifts, selected-plan traces, and a step-boundary gate around upstream simulation.
+- Restricted training freezes memberships and action normalization before fitting. The archive identity, action support, episode roles, retained clip digests, and resolved training settings are saved for audit.
 
 The pretrained checkpoint study and training-from-scratch study are separate deliverables. Return the result directories and environment lock from the GPU system so measured metrics can be compared with the paper. Only then can the baseline be declared reproduced.
 
-## Next stage after baseline verification
+## Restricted-base uncertainty study
 
-Run a prior-deviation planning smoke check with the released checkpoint:
+Run from `reproduction` after completing a published-data baseline. First time a training batch and a small planning run on the 24 GB GPU. Check the restricted pilot has enough cases in each clean validation role and in the intended action bands. The example uses quantile 0.8. Record the pilot choice and keep it fixed across the primary training seeds.
 
 ```bash
-printf '%s\n' '{"method":"prior","beta":0.1}' > prior-smoke.json
-python run.py eval --task pusht --smoke --uncertainty-config prior-smoke.json
+task=pusht
+seed=3072
+quantile=0.8
+name="restricted-seed$seed"
+report="$STABLEWM_HOME/study/$task/$name"
+mkdir -p "$report"
+python run.py train --task "$task" --seed "$seed" --split-seed 42 --action-holdout "$quantile"
+checkpoint="restricted/$quantile/$task/seed-$seed/weights_epoch_10.pt"
+manifest="$STABLEWM_HOME/results/train-$task-released-train3072-seed$seed-action-id-$quantile/action_holdout.json"
+python fit_uncertainty.py --task "$task" --name "$name" --checkpoint "$checkpoint" --holdout-manifest "$manifest"
+artifacts="$STABLEWM_HOME/uncertainty/$task/$name"
+python evaluate_uncertainty.py --task "$task" --artifacts "$artifacts" --output "$report/offline.json"
 ```
 
-An uncertainty configuration accepts `method` (`prior`, `knn`, or `ensemble`), a nonnegative `beta`, and a positive `scale` fitted on score-calibration episodes. For `knn`, provide a `training_bank` tensor file and optional `k`. New ensemble fits provide five equally trained `predictor_checkpoints` with `include_base_predictor=false`; the original predictor remains the baseline goal model. All heads share the frozen vision encoder, projection, and action-encoder training policy. Legacy configurations count the base predictor by default and must be refitted for the revised study. The command stores the exact configuration beside results.
+Repeat with seeds 3073 and 3074 and the same split seed. The fitter keeps the shared vision encoder, projection, and action encoder frozen. It trains five fresh bootstrapped predictor/projection pairs for equal numbers of clips and updates, retains the base goal cost, and holds out separate score-fitting, penalty-selection, threshold-calibration, and test episodes. Refit earlier uncertainty artifacts for this protocol.
 
-Fit the ensemble and reference bank, then evaluate on the held-out episodes:
+The offline evaluator saves per-clip errors and scores, paired images, training physical-state coverage, and held-out probe quality. It applies the same tint, distractor, and occlusion to the history and shifted target. A clean next target is retained for a second error. The trained probe reports errors in units of training-state standard deviations. Review the paired images and annotate task-critical occlusion overlap where supported by the scene.
 
-```bash
-python fit_uncertainty.py --task pusht --name run1
-python run.py eval --task pusht --uncertainty-config "$STABLEWM_HOME/uncertainty/pusht/run1/knn.json"
-python run.py eval --task pusht --uncertainty-config "$STABLEWM_HOME/uncertainty/pusht/run1/ensemble.json"
-```
+The original predictor provides the base forecast. The uncertainty files `ensemble.json`, `knn.json`, and `prior.json` supply candidate penalties. The prior switches to Mahalanobis when radial KS distance exceeds 0.20 or at least 5% of scores saturate. Offline reports retain radial and Mahalanobis diagnostics across both current observations and forecasts.
 
-Fitting keeps the representation and action encoder frozen, bootstraps training episodes for all five fresh predictors, and saves disjoint episode roles. Score scales use only score-calibration clips. A released checkpoint may have seen data used for this downstream split; use the same separately trained restricted checkpoint for primary action/visual comparisons.
+### Select a policy and freeze its gate
 
-The fit saves `prior-diagnostics.json`, including norm mean/variance and saturation, and training-only shrinkage covariance in `prior-stats.pt`. Under the isotropic Gaussian assumption, the two-sided radial tail score follows an exponential distribution. The planner switches to Mahalanobis if radial KS distance exceeds 0.20 or at least 5% of scores hit the ceiling; these are fixed heuristic thresholds. Offline evaluation retains both radial and Mahalanobis scores, current-observation kNN/prior scores, and clean-target error regardless of the planner mode. Physical probe errors remain auxiliary diagnostics.
+Use the clean penalty-selection episodes for all four betas. The selector chooses the largest beta within a 0.02 empirical ID success drop. If it selects zero, retain that result and omit the positive-penalty comparison.
 
 ```bash
-python evaluate_uncertainty.py --task pusht \
-  --artifacts "$STABLEWM_HOME/uncertainty/pusht/run1" \
-  --output pusht-offline.json
-```
-
-The offline evaluator applies three RGB tint strengths to the same held-out clips while preserving simulator states and action sequences. It fits the linear physical-state probe on clean training clips. It separately reports prediction error and the probe's error on observed latents, so a degraded probe can be identified.
-
-Use `summarize_uncertainty.py` to combine matched offline reports from independent training runs. It preserves the sample count for each run and leaves undefined metrics empty. With at least three distinct checkpoints fitted without the smoke training cap, it reports a 95% t interval for each metric across the runs where that metric is defined.
-
-```bash
-python summarize_uncertainty.py seed3072-offline.json seed3073-offline.json seed3074-offline.json \
-  --output offline-summary.json
-```
-
-For controlled action holdout, train the encoder and predictor from scratch with a restricted action range, then use that checkpoint and its manifest for uncertainty fitting.
-
-```bash
-python run.py train --task pusht --seed 3072 --action-holdout 0.8
-checkpoint=restricted/0.8/pusht/seed-3072/weights_epoch_10.pt
-manifest="$STABLEWM_HOME/results/train-pusht-released-train3072-seed3072-action-id-0.8/action_holdout.json"
-python fit_uncertainty.py --task pusht --name action-run1 \
-  --checkpoint "$checkpoint" --holdout-manifest "$manifest"
-python evaluate_uncertainty.py --task pusht \
-  --artifacts "$STABLEWM_HOME/uncertainty/pusht/action-run1" --output pusht-action.json
-```
-
-The cutoff is a training-episode quantile of the largest absolute raw action component in each predictor input window. The training and validation loaders include only windows at or below that cutoff. The test uses disjoint episodes. The three higher-action bands use the 33rd and 67th percentiles of training-partition windows excluded by the cutoff. If no training-partition windows exceed the cutoff, the two upper boundaries are 10% and 25% above it. Empty bands are reported as null. These bands use actions from the recorded trajectories, so differences in visited states can affect comparisons. The visual-only offline comparison uses held-out windows within the trained action range.
-
-For closed-loop visual evaluation, run a clean validation pass to calibrate the abstention threshold. Then use the same estimator settings and the test split for each tint level. The command records uncertainty for the final plan returned by CEM and each replanning step.
-
-```bash
-settings="$STABLEWM_HOME/uncertainty/pusht/run1/prior.json"
-python run.py eval --task pusht --uncertainty-config "$settings" --threshold-calibration
-python run.py eval --task pusht --uncertainty-config "$settings" --visual-tint 0.35
-base="$STABLEWM_HOME/results/eval-pusht-released-train3072-seed42-uncertainty-prior"
-python report_episode_metrics.py --calibration "$base-threshold-calibration/metrics.json" \
-  --test "$base-tint-0.35/metrics.json" --output pusht-tint-035-episodes.json
-```
-
-For a full study, choose the penalty on clean validation episodes before running those test commands. Specify the grid before inspecting test results:
-
-```bash
+tag=$(printf '%s' "$checkpoint" | sha256sum | cut -c1-12)
+prefix="$STABLEWM_HOME/results/eval-$task-released-train3072-seed42-checkpoint-$tag"
+eval_options=(eval --task "$task" --checkpoint "$checkpoint" --seed 42)
 for beta in 0 0.05 0.1 0.25; do
-  python run.py eval --task pusht --uncertainty-config "$settings" --calibration --beta "$beta"
+  python run.py "${eval_options[@]}" --uncertainty-config "$artifacts/ensemble.json" --calibration --beta "$beta"
 done
-python select_penalty.py "$base"-beta-*-calibration/metrics.json \
-  --output "$STABLEWM_HOME/uncertainty/pusht/run1/prior-selected.json"
+python select_penalty.py "$prefix"-uncertainty-ensemble-beta-*-calibration/metrics.json \
+  --output "$artifacts/ensemble-selected.json"
+selected="$artifacts/ensemble-selected.json"
+python run.py "${eval_options[@]}" --uncertainty-config "$selected" --threshold-calibration
+calibration="$prefix-uncertainty-ensemble-selected-threshold-calibration/metrics.json"
+python report_episode_metrics.py --calibration "$calibration" --gate-output "$report/gate.json"
 ```
 
-The selector checks matched cases/settings and chooses the largest grid penalty within the empirical ID success-loss tolerance (`--max-id-drop 0.02` by default). Zero remains valid if no positive candidate qualifies. This is not a statistical guarantee of ID preservation. Save the selected configuration beside the original artifacts, then run it with `--threshold-calibration` on the separate threshold episodes before the held-out run. Do not use penalty-selection traces for threshold fitting. Old artifacts need refitting; at least three usable validation episodes are required. See [the revised implementation plan](IMPLEMENTATION_PLAN.md) for the complete protocol and remaining work.
+The threshold uses the maximum of normalized forecast ensemble disagreement and normalized kNN distance from the current observation. Only forecast disagreement contributes to the CEM penalty. The frozen threshold records the selected policy, score settings, artifact content hashes, and planner settings. Keep the calibration, selection, and test artifacts together.
 
-The episode report replays the first-plan accept/reject decision against the recorded outcome. It also measures warnings at later replans and uses the task budget as the failure time for episodes that miss the goal. Run the clean test condition to measure ID false alarms.
-
-To measure the effect of the planner penalty, copy the uncertainty JSON in the same directory and set `beta=0`. Run the same test condition with the same seed and checkpoint. Compare the resulting files:
+### Test with and without execution gating
 
 ```bash
-python compare_planning.py --pair /path/to/zero/metrics.json /path/to/penalty/metrics.json \
-  --output planning-comparison.json
+shift=(--visual-family distractor --visual-severity 0.15 --visual-mode observation)
+python run.py "${eval_options[@]}" --uncertainty-config "$selected" "${shift[@]}"
+python run.py "${eval_options[@]}" --uncertainty-config "$selected" "${shift[@]}" --gate "$report/gate.json"
+condition="$prefix-uncertainty-ensemble-selected-distractor-0.15-observation-visualseed42"
+python report_episode_metrics.py --calibration "$calibration" --test "$condition/metrics.json" \
+  --output "$report/episodes-ungated.json"
+python report_episode_metrics.py --calibration "$calibration" --test "$condition-gated-gate/metrics.json" \
+  --output "$report/episodes-gated.json"
 ```
 
-The comparison checks that each pair used the same start cases, solver, model, estimator, and shift. Repeat `--pair` for each independent training seed. With at least three distinct checkpoints and one pair per checkpoint, it also reports a 95% t interval across checkpoint-level differences. Checkpoints supplied for this interval must come from independent training runs.
+Repeat the ungated and gated commands on clean held-out cases. Test tint at 0.15, 0.35, and 0.60 and distractors and occlusions at 0.05, 0.15, and 0.30. Use `--visual-mode observation` and `both` for the main comparison and `goal` for the diagnostic subset. `--visual-tint 0.35` remains shorthand for the legacy observation-plus-goal tint. Use `--action-band 1`, `2`, and `3` for ungated planning comparisons on higher-action reference paths with clean visuals. Band 0 constrains raw planner commands to the training cutoff, and its frozen gate requires those same action bounds. Command exposure records raw actions actually sent to each simulator.
 
-For a closed-loop action-band comparison, use uncertainty artifacts fitted from a restricted checkpoint. The validation run selects in-range recorded start-to-goal paths. Test runs can select one of three higher bands with `--action-band 1`, `2`, or `3`:
+An actual rejection executes zero task actions and has a null outcome. The gated report gives coverage and success among accepted cases. The ungated report gives retrospective risk–coverage and failure AUROC. The traces log selected plans, physical state, and timestamps. Budget exhaustion and environment truncation are reported separately. Cube physical failure lead time requires a validated event definition and real trajectories.
+
+For positive selected beta, save a copy of the selected JSON beside it as `ensemble-zero.json` with `beta` set to zero and run the same ungated cases and shifts. Use the planner comparison with one `--pair` per independent training seed. It checks paired case identities and reports episode-cluster intervals. The combined training-seed and episode interval requires three audited independent bases with identical test cases and matching, uncapped head fits.
 
 ```bash
-action_config="$STABLEWM_HOME/uncertainty/pusht/action-run1/prior.json"
-checkpoint=restricted/0.8/pusht/seed-3072/weights_epoch_10.pt
-python run.py eval --task pusht --checkpoint "$checkpoint" --uncertainty-config "$action_config" --calibration
-python run.py eval --task pusht --checkpoint "$checkpoint" --uncertainty-config "$action_config" --action-band 1
+python compare_planning.py --pair /path/to/beta-zero/metrics.json /path/to/positive/metrics.json \
+  --output "$report/planning-comparison.json"
+python plot_results.py --offline "$report/offline.json" --planning "$condition/metrics.json" \
+  --episode-report "$report/episodes-ungated.json" --output "$report/figures"
 ```
 
-The band labels the recorded reference path. For band 0, including threshold calibration, CEM candidates are restricted to the training action range. In the higher bands the planner chooses its own commands. Reports count raw commands sent above the cutoff, before any clipping inside the simulator. This shows whether the higher-band planner actually proposes out-of-range actions while pursuing goals from higher-action demonstrations.
+### Research controls and aggregation
+
+Use the same PushT training seeds, split, and action quantile for SIGReg weights 0.009, 0.09, and 0.45. The runner records the upstream coefficient and writes separate checkpoints. With `--sigreg-weight 0.009`, add `/sigreg-0.009` after `restricted/$quantile` in the checkpoint path and `-sigreg-0.009` to the training-result folder name. Refit and evaluate each model with matching settings, then compare latent coordinate variance, observed and forecast norms, errors, and ID/shifted success.
+
+```bash
+python run.py train --task pusht --seed 3072 --split-seed 42 --action-holdout "$quantile" --sigreg-weight 0.009
+python summarize_uncertainty.py /path/to/seed3072/offline.json /path/to/seed3073/offline.json \
+  /path/to/seed3074/offline.json --episode-bootstrap 500 --output "$STABLEWM_HOME/study/offline-summary.json"
+python encoder_control.py --artifacts /path/to/seed3072/artifacts /path/to/seed3073/artifacts \
+  /path/to/seed3074/artifacts --output "$STABLEWM_HOME/study/encoder-control.json"
+```
+
+The independent-encoder control uses identical offline action candidates and goal images for all models. Each model computes its scalar goal costs within its own representation and scales them using clean score-calibration cases. It reports candidate disagreement, rank agreement, and encoder cost.
+
+Aggregate offline reports with matching prior fallback modes. Keep chi-square and Mahalanobis fallback runs in separate groups when the fitted modes differ across seeds.
+
+For compact ablations, refit with a different `--members`, `--k`, or `--bank-size` and a distinct name. One frozen base predictor is the prediction and unpenalized planning reference. Repeat calibration for each fit before the held-out comparison.
+
+Repeat the core protocol on Reacher. For the Cube event study, start with the published baseline and clean/shifted traces and verify the simulator event semantics before defining physical failure. Keep all timed runs, data and source manifests, environment versions, checkpoints, logs, and results for the H1–H4 analysis.

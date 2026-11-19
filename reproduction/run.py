@@ -40,6 +40,40 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def dataset_provenance(dataset):
+    dataset = Path(dataset)
+    manifest = dataset.with_suffix('.provenance.json')
+    record = json.loads(manifest.read_text()) if manifest.is_file() else {}
+    return dict(record, dataset_bytes=dataset.stat().st_size)
+
+
+def uncertainty_artifact_paths(base, settings, settings_dir):
+    checkpoints = base / 'checkpoints'
+    paths = {'base_model_config': (checkpoints / settings['base_checkpoint']).with_name('config.json')}
+    for key in ('training_bank', 'prior_stats', 'diagnostic_prior_stats', 'action_bank'):
+        if key in settings:
+            paths[key] = settings_dir / settings[key]
+    for index, checkpoint in enumerate(settings.get('predictor_checkpoints', [])):
+        weights = checkpoints / checkpoint
+        paths[f'predictor_{index}_weights'] = weights
+        paths[f'predictor_{index}_config'] = weights.with_name('config.json')
+    return paths
+
+
+def verify_uncertainty_artifacts(base, settings, settings_dir, *, required=False):
+    expected = settings.get('artifact_sha256')
+    if not expected:
+        if required:
+            raise ValueError('Refit score artifacts with content hashes before hybrid threshold calibration or gating.')
+        return
+    paths = uncertainty_artifact_paths(base, settings, settings_dir)
+    if set(paths) != set(expected):
+        raise ValueError('Fitted uncertainty artifact paths do not match the recorded content hashes.')
+    for name, path in paths.items():
+        if not path.is_file() or sha256(path) != expected[name]:
+            raise ValueError(f'Fitted uncertainty artifact content has changed: {name}.')
+
+
 def extract_archive(archive, target, is_tar):
     import zstandard
     target.mkdir(parents=True, exist_ok=True)
@@ -71,6 +105,10 @@ def download(task):
     metadata = next(x for x in read_json('dataset-manifest.json') if x['task'] == task)
     revision = next(x['revision'] for x in read_json('dataset-revisions.json') if x['task'] == task)
     entry = next(x for x in metadata['files'] if x['path'].endswith('.zst'))
+    unpacked = base / 'extracted' / task
+    marker = unpacked / '.complete'
+    if marker.exists() and marker.read_text().strip() != revision:
+        raise ValueError(f'Extracted dataset revision differs from the pinned revision: {marker}.')
     archive_dir = base / 'archives' / task
     archive = Path(hf_hub_download(repo, entry['path'], repo_type='dataset',
                    revision=revision, local_dir=archive_dir))
@@ -79,8 +117,6 @@ def download(task):
     expected_hash = entry.get('lfs', {}).get('oid')
     if expected_hash and sha256(archive) != expected_hash:
         raise ValueError('Dataset SHA256 does not match official manifest')
-    unpacked = base / 'extracted' / task
-    marker = unpacked / '.complete'
     if not marker.exists():
         extract_archive(archive, unpacked, archive.name.endswith('.tar.zst'))
         marker.write_text(revision)
@@ -99,6 +135,10 @@ def download(task):
         destination.symlink_to(dataset)
     elif destination.resolve() != dataset.resolve():
         raise FileExistsError(f'Dataset destination already exists: {destination}')
+    destination.with_suffix('.provenance.json').write_text(json.dumps({
+        'dataset_source': repo, 'dataset_revision': revision, 'archive_sha256': expected_hash,
+        'archive_bytes': entry['size'],
+    }, indent=2))
     download_checkpoint(task, base)
     print(f'{task}: dataset and released checkpoint ready at {base}')
 
@@ -146,14 +186,24 @@ def command(args, base, output):
         holdout = getattr(args, 'action_holdout', None)
         prefix = f'restricted/{holdout}' if holdout else 'retrained'
         smoke_prefix = f'smoke-restricted/{holdout}' if holdout else 'smoke'
+        split_seed = getattr(args, 'split_seed', 42)
+        if holdout and split_seed != 42:
+            prefix += f'/split-{split_seed}'
+            smoke_prefix += f'/split-{split_seed}'
+        sigreg_weight = getattr(args, 'sigreg_weight', None)
+        if sigreg_weight is not None:
+            prefix += f'/sigreg-{sigreg_weight:g}'
+            smoke_prefix += f'/sigreg-{sigreg_weight:g}'
         run_subdir = f'{args.task}/seed-{args.seed}'
-        if holdout:
+        if holdout or sigreg_weight is not None:
             run_subdir = f'{prefix}/{run_subdir}'
         cmd = common + [str(SOURCE / 'train.py'), f'data={group}',
             f'data.dataset.name={dataset}.h5', 'trainer.max_epochs=10',
             f'seed={args.seed}', f'subdir={run_subdir}',
             f'output_model_name={prefix}/{args.task}/seed-{args.seed}',
             'wandb.enabled=false']
+        if sigreg_weight is not None:
+            cmd.append(f'loss.sigreg.weight={sigreg_weight}')
         if args.smoke:
             cmd += ['trainer.max_epochs=1', '+trainer.limit_train_batches=2',
                     '+trainer.limit_val_batches=1', 'loader.batch_size=2',
@@ -167,6 +217,10 @@ def command(args, base, output):
             f'policy={policy}', f'seed={args.seed}', f'solver.n_steps={iterations}',
             '+cache_dir=null', f'eval.num_eval={2 if args.smoke else 50}',
             'output.filename=results.txt']
+        if args.smoke:
+            cmd += ['solver.n_steps=2', 'solver.num_samples=8', 'solver.topk=4']
+        if getattr(args, 'num_eval', None) is not None:
+            cmd.append(f'eval.num_eval={args.num_eval}')
     return cmd
 
 
@@ -179,11 +233,21 @@ def run(args):
     run_name = f'{args.action}-{args.task}-{label}-train{args.training_seed}-seed{args.seed}'
     if args.action_holdout:
         run_name += f'-action-id-{args.action_holdout}'
+        if args.split_seed != 42:
+            run_name += f'-split{args.split_seed}'
+    if args.sigreg_weight is not None:
+        run_name += f'-sigreg-{args.sigreg_weight:g}'
+    if args.checkpoint:
+        run_name += f'-checkpoint-{hashlib.sha256(args.checkpoint.encode()).hexdigest()[:12]}'
     if args.uncertainty_config:
         settings = json.loads(args.uncertainty_config.read_text())
         checkpoint = eval_checkpoint(args)
         if settings.get('base_checkpoint', checkpoint) != checkpoint:
             raise ValueError('The uncertainty artifacts were fitted with a different base checkpoint.')
+        if settings.get('base_checkpoint_sha256') and sha256(base / 'checkpoints' / checkpoint) != settings['base_checkpoint_sha256']:
+            raise ValueError('The fitted base checkpoint content has changed.')
+        verify_uncertainty_artifacts(base, settings, args.uncertainty_config.parent,
+                                     required=bool(args.gate or (args.threshold_calibration and settings.get('observation_scale'))))
         run_name += f'-uncertainty-{args.uncertainty_config.stem}'
         if args.beta is not None:
             settings['beta'] = args.beta
@@ -193,6 +257,15 @@ def run(args):
             raise ValueError('Refit artifacts with separate selection and threshold episode partitions.')
         settings.update(evaluation_split=evaluation_split,
                         visual_tint=args.visual_tint)
+        if args.visual_family:
+            settings['visual_shift'] = {
+                'family': args.visual_family, 'severity': args.visual_severity,
+                'mode': args.visual_mode, 'seed': args.visual_seed,
+            }
+            run_name += f'-{args.visual_family}-{args.visual_severity:g}-{args.visual_mode}-visualseed{args.visual_seed}'
+        if args.gate:
+            settings['gate'] = json.loads(args.gate.read_text())
+            run_name += f'-gated-{args.gate.stem}'
         if 'action_severity_edges' in settings:
             settings['action_band'] = args.action_band if args.action_band is not None else 0
         elif args.action_band is not None:
@@ -207,6 +280,8 @@ def run(args):
             run_name += f'-tint-{args.visual_tint}'
     if args.smoke:
         run_name = 'smoke-' + run_name
+    if args.num_eval:
+        run_name += f'-cases{args.num_eval}'
     output = base / 'results' / run_name
     output.mkdir(parents=True, exist_ok=False)
     cmd = command(args, base, output)
@@ -216,8 +291,11 @@ def run(args):
     env.pop('LEWM_ACTION_HOLDOUT', None)
     if args.action_holdout:
         env['LEWM_ACTION_HOLDOUT'] = str(args.action_holdout)
+        env['LEWM_SPLIT_SEED'] = str(args.split_seed)
+        env['LEWM_SMOKE_TRAINING'] = '1' if args.smoke else '0'
+        env['LEWM_DATASET_PROVENANCE'] = json.dumps(dataset_provenance(dataset))
     if args.uncertainty_config:
-        for name in ('training_bank', 'prior_stats'):
+        for name in ('training_bank', 'prior_stats', 'action_bank'):
             if name in settings:
                 settings[name] = str((args.uncertainty_config.parent / settings[name]).resolve())
         env['LEWM_UNCERTAINTY'] = json.dumps(settings)
@@ -234,6 +312,7 @@ def run(args):
     (output / 'status.json').write_text(json.dumps({'exit_code': code, 'smoke': args.smoke}))
     if code:
         raise SystemExit(code)
+    print(f'Saved run to {output}')
 
 
 def main():
@@ -248,28 +327,50 @@ def main():
     parser.add_argument('--beta', type=float, help='Override the uncertainty penalty for a validation sweep')
     parser.add_argument('--checkpoint', help='Weights path in the stable-worldmodel checkpoint cache')
     parser.add_argument('--action-holdout', type=float, help='Train on clips below this training action quantile')
+    parser.add_argument('--split-seed', type=int, default=42, help='Freeze episode partitions across training seeds')
+    parser.add_argument('--sigreg-weight', type=float, help='Override the upstream SIGReg coefficient (default: 0.09)')
+    parser.add_argument('--num-eval', type=int, help='Number of evaluation cases for an uncertainty run')
     calibration = parser.add_mutually_exclusive_group()
     calibration.add_argument('--calibration', action='store_true', help='Evaluate ID penalty-selection episodes')
     calibration.add_argument('--threshold-calibration', action='store_true', help='Evaluate separate ID threshold episodes')
     parser.add_argument('--action-band', type=int, choices=(0, 1, 2, 3),
                         help='Select cases by recorded action band, with 0 in the training range')
     parser.add_argument('--visual-tint', type=float, default=0.0, choices=(0.0, 0.15, 0.35, 0.6))
+    parser.add_argument('--visual-family', choices=('tint', 'distractor', 'occlusion'))
+    parser.add_argument('--visual-severity', type=float)
+    parser.add_argument('--visual-mode', choices=('observation', 'both', 'goal'), default='both')
+    parser.add_argument('--visual-seed', type=int, default=42)
+    parser.add_argument('--gate', type=Path, help='Frozen initial-plan threshold produced by report_episode_metrics.py')
     args = parser.parse_args()
     if args.action_holdout is not None and (args.action != 'train' or not 0 < args.action_holdout < 1):
         parser.error('--action-holdout requires train and a quantile strictly between zero and one')
     if args.checkpoint and args.action != 'eval':
         parser.error('--checkpoint is only supported for eval')
+    if args.sigreg_weight is not None and (
+        args.action != 'train' or not math.isfinite(args.sigreg_weight) or args.sigreg_weight < 0
+    ):
+        parser.error('--sigreg-weight requires train and a finite, nonnegative weight')
     if args.uncertainty_config and args.action != 'eval':
         parser.error('--uncertainty-config is only supported for eval')
     if args.beta is not None and (not args.calibration or not math.isfinite(args.beta) or args.beta < 0):
         parser.error('--beta requires calibration and a finite, nonnegative weight')
-    if (args.calibration or args.threshold_calibration or args.visual_tint or args.action_band is not None) and (
+    shifted = args.visual_family or args.visual_tint
+    validating = args.calibration or args.threshold_calibration
+    if (validating or shifted or args.gate or args.num_eval is not None or args.action_band is not None) and (
         not args.uncertainty_config or args.action != 'eval'
     ):
         parser.error('Calibration and shift flags require evaluation with an uncertainty configuration')
-    if (args.calibration or args.threshold_calibration) and args.visual_tint:
-        parser.error('Calibration requires clean visuals')
-    if args.action_band and (args.calibration or args.threshold_calibration or args.visual_tint):
+    if args.num_eval is not None and args.num_eval < 1:
+        parser.error('--num-eval must be positive')
+    if args.visual_family:
+        from visual_shift import LEVELS
+        if args.visual_tint or args.visual_severity not in LEVELS[args.visual_family]:
+            parser.error('Choose a preregistered --visual-severity for --visual-family')
+    elif args.visual_severity is not None or args.visual_mode != 'both' or args.visual_seed != 42:
+        parser.error('Visual severity, mode, and seed require --visual-family')
+    if validating and (shifted or args.gate):
+        parser.error('Calibration requires clean visuals and ungated execution')
+    if args.action_band and (validating or shifted):
         parser.error('Higher action bands must use test episodes with clean visuals')
     if args.action == 'doctor':
         doctor()

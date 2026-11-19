@@ -46,7 +46,7 @@ def generate_fixture(task, root):
             del data[group]
 
 
-def smoke(task, root, existing_checkpoint):
+def smoke(task, root, existing_checkpoint, existing_fixture=None):
     root.mkdir(parents=True, exist_ok=False)
     env = dict(os.environ, STABLEWM_HOME=str(root), MUJOCO_GL='egl',
                SDL_VIDEODRIVER='dummy', OMP_NUM_THREADS='2', MKL_NUM_THREADS='2')
@@ -57,7 +57,12 @@ def smoke(task, root, existing_checkpoint):
 
     run('run.py', 'doctor')
     os.environ.update({key: env[key] for key in ('MUJOCO_GL', 'SDL_VIDEODRIVER')})
-    generate_fixture(task, root)
+    if existing_fixture:
+        target = root / 'datasets' / f'{TASKS[task][1]}.h5'
+        target.parent.mkdir(parents=True)
+        target.symlink_to(existing_fixture.resolve())
+    else:
+        generate_fixture(task, root)
     if existing_checkpoint:
         destination = root / 'checkpoints' / 'released' / task
         destination.parent.mkdir(parents=True)
@@ -65,28 +70,49 @@ def smoke(task, root, existing_checkpoint):
     else:
         download_checkpoint(task, root)
     run('run.py', 'eval', '--task', task, '--smoke')
-    run('run.py', 'train', '--task', task, '--seed', 3072, '--smoke')
+    # Short random trajectories need a broad range for 25-step ID paths.
+    quantile = 0.999
+    run('run.py', 'train', '--task', task, '--seed', 3072, '--smoke',
+        '--action-holdout', quantile, '--sigreg-weight', 0.09)
+    checkpoint = f'smoke-restricted/{quantile}/sigreg-0.09/{task}/seed-3072/weights_epoch_1.pt'
+    manifest = next((root / 'results').glob('*/action_holdout.json'))
     run('fit_uncertainty.py', '--task', task, '--name', 'smoke', '--epochs', 1,
-        '--batch-size', 4, '--max-clips', 8, '--bank-size', 12, '--validation-clips', 12)
+        '--batch-size', 4, '--max-clips', 8, '--bank-size', 12, '--validation-clips', 12,
+        '--checkpoint', checkpoint, '--holdout-manifest', manifest)
     artifacts = root / 'uncertainty' / task / 'smoke'
     run('evaluate_uncertainty.py', '--task', task, '--artifacts', artifacts,
         '--probe-clips', 12, '--test-clips', 10, '--batch-size', 4, '--output', root / 'offline.json')
-    settings = artifacts / 'prior.json'
-    run('run.py', 'eval', '--task', task, '--smoke', '--uncertainty-config', settings, '--threshold-calibration')
-    run('run.py', 'eval', '--task', task, '--smoke', '--uncertainty-config', settings, '--visual-tint', 0.35)
     cases = root / 'results'
-    base = f'smoke-eval-{task}-released-train3072-seed42-uncertainty-prior'
-    validation = cases / f'{base}-threshold-calibration' / 'metrics.json'
-    tinted = cases / f'{base}-tint-0.35' / 'metrics.json'
-    run('report_episode_metrics.py', '--calibration', validation, '--test', tinted,
-        '--output', root / 'episodes.json')
-    zero = json.loads(settings.read_text())
-    zero['beta'] = 0
-    zero_settings = artifacts / 'prior-zero.json'
-    zero_settings.write_text(json.dumps(zero))
-    run('run.py', 'eval', '--task', task, '--smoke', '--uncertainty-config', zero_settings, '--visual-tint', 0.35)
-    baseline = cases / f'{base}-zero-tint-0.35' / 'metrics.json'
-    run('compare_planning.py', '--pair', baseline, tinted, '--output', root / 'paired.json')
+    settings = artifacts / 'ensemble.json'
+    selected = artifacts / 'ensemble-selected.json'
+
+    def evaluate(config, *extras):
+        run('run.py', 'eval', '--task', task, '--smoke', '--checkpoint', checkpoint,
+            '--uncertainty-config', config, *extras)
+
+    for beta in (0, 0.05):
+        evaluate(settings, '--calibration', '--beta', beta)
+    run('select_penalty.py', *sorted(cases.glob('*-calibration/metrics.json')), '--output', selected)
+    evaluate(selected, '--threshold-calibration')
+    calibration = next(cases.glob('*-threshold-calibration/metrics.json'))
+    gate = root / 'gate.json'
+    run('report_episode_metrics.py', '--calibration', calibration, '--gate-output', gate)
+    shift = ('--visual-family', 'distractor', '--visual-severity', 0.15, '--visual-mode', 'observation')
+    evaluate(selected, *shift)
+    ungated = next(cases.glob('*-distractor-*/metrics.json'))
+    run('report_episode_metrics.py', '--calibration', calibration, '--test', ungated,
+        '--output', root / 'episodes-ungated.json')
+    evaluate(selected, *shift, '--gate', gate)
+    gated = next(cases.glob('*-gated-gate/metrics.json'))
+    run('report_episode_metrics.py', '--calibration', calibration, '--test', gated,
+        '--output', root / 'episodes-gated.json')
+    chosen = json.loads(selected.read_text())
+    if chosen['beta'] > 0:
+        zero_settings = artifacts / 'ensemble-zero.json'
+        zero_settings.write_text(json.dumps(dict(chosen, beta=0)))
+        evaluate(zero_settings, *shift)
+        baseline = next(cases.glob('*-ensemble-zero-distractor-*/metrics.json'))
+        run('compare_planning.py', '--pair', baseline, ungated, '--output', root / 'paired.json')
     print(f'All smoke stages completed for {task}. Outputs: {root}')
 
 
@@ -96,8 +122,11 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, required=True, help='New directory for generated fixture and reports')
     parser.add_argument('--existing-checkpoint', type=Path,
                         help='Reuse a local released checkpoint directory containing config.json and weights.pt')
+    parser.add_argument('--existing-fixture', type=Path, help='Reuse a local simulator-generated HDF5 fixture')
     args = parser.parse_args()
     if args.existing_checkpoint and not all((args.existing_checkpoint / name).is_file()
                                             for name in ('config.json', 'weights.pt')):
         parser.error('--existing-checkpoint must contain config.json and weights.pt')
-    smoke(args.task, args.output.resolve(), args.existing_checkpoint)
+    if args.existing_fixture and not args.existing_fixture.is_file():
+        parser.error('--existing-fixture must point to an existing HDF5 file')
+    smoke(args.task, args.output.resolve(), args.existing_checkpoint, args.existing_fixture)
